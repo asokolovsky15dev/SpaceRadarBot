@@ -1,4 +1,5 @@
 using SpaceRadarBot.Data;
+using SpaceRadarBot.Models;
 using SpaceRadarBot.Services;
 using Telegram.Bot;
 using Telegram.Bot.Types;
@@ -54,9 +55,13 @@ public class BotHandlers
         {
             await HandleNextCommand(chatId, message.From?.Id ?? 0);
         }
-        else if (text.StartsWith("/previous"))
+        else if (text.StartsWith("/settings"))
         {
-            await HandlePreviousCommand(chatId);
+            await HandleSettingsCommand(chatId, message.From?.Id ?? 0);
+        }
+        else if (text.StartsWith("/count"))
+        {
+            await HandleCountCommand(chatId, message.From?.Id ?? 0);
         }
     }
 
@@ -66,7 +71,7 @@ public class BotHandlers
                            "Я помогу вам отслеживать предстоящие космические запуски и уведомлю вас перед стартом.\n\n" +
                            "Команды:\n" +
                            "/next - Показать следующие 5 предстоящих запусков\n" +
-                           "/previous - Показать последние 5 завершённых запусков\n\n" +
+                           "/settings - Настроить автоматические уведомления\n\n" +
                            "Вы можете подписаться на уведомления о запуске, нажав кнопку под каждым запуском. " +
                            "Вы получите уведомление за 30 минут до старта!";
 
@@ -95,24 +100,31 @@ public class BotHandlers
         }
     }
 
-    private async Task HandlePreviousCommand(long chatId)
+    private async Task HandleSettingsCommand(long chatId, long userId)
     {
-        await _botClient.SendMessage(chatId, "🔍 Загружаю завершённые запуски...", disableNotification: false);
+        var currentPreference = _database.GetUserPreference(userId);
+        var message = "⚙️ Настройки автоматических уведомлений\n\n" +
+                     "Выберите, о каких запусках вы хотите получать автоматические уведомления за 30 минут до старта:\n\n" +
+                     $"Текущая настройка: {FormatPreference(currentPreference)}";
 
-        var launches = await _launchService.GetPreviousLaunchesAsync();
+        var keyboard = CreateSettingsKeyboard(currentPreference);
 
-        if (launches.Count == 0)
-        {
-            await _botClient.SendMessage(chatId, "В данный момент завершённые запуски не найдены. Попробуйте позже.", disableNotification: false);
-            return;
-        }
+        await _botClient.SendMessage(chatId, message, replyMarkup: keyboard, disableNotification: false);
+    }
 
-        foreach (var launch in launches)
-        {
-            var message = FormatLaunchMessage(launch, isPrevious: true);
-            await _botClient.SendMessage(chatId, message, disableNotification: false);
-            await Task.Delay(50);
-        }
+    private async Task HandleCountCommand(long chatId, long userId)
+    {
+        var (total, manual, automatic, pending) = _database.GetUserSubscriptionCounts(userId);
+        var preference = _database.GetUserPreference(userId);
+
+        var message = "📊 Статистика подписок\n\n" +
+                     $"Всего подписок: {total}\n" +
+                     $"├─ Ручных: {manual}\n" +
+                     $"├─ Автоматических: {automatic}\n" +
+                     $"└─ Ожидают отправки: {pending}\n\n" +
+                     $"Текущая настройка: {FormatPreference(preference)}";
+
+        await _botClient.SendMessage(chatId, message, disableNotification: false);
     }
 
     private async Task HandleCallbackQueryAsync(CallbackQuery callbackQuery)
@@ -124,43 +136,52 @@ public class BotHandlers
         if (data.StartsWith("subscribe_"))
         {
             var launchId = data.Replace("subscribe_", "");
-            await HandleSubscribe(chatId, userId, launchId, callbackQuery.Message?.MessageId ?? 0);
+            await HandleSubscribe(chatId, userId, launchId, callbackQuery.Message?.MessageId ?? 0, callbackQuery.Id);
         }
-
-        await _botClient.AnswerCallbackQuery(callbackQuery.Id);
+        else if (data.StartsWith("unsubscribe_"))
+        {
+            var launchId = data.Replace("unsubscribe_", "");
+            await HandleUnsubscribe(chatId, userId, launchId, callbackQuery.Message?.MessageId ?? 0, callbackQuery.Id);
+        }
+        else if (data.StartsWith("pref_"))
+        {
+            await HandlePreferenceChange(chatId, userId, data, callbackQuery.Message?.MessageId ?? 0, callbackQuery.Id);
+        }
+        else
+        {
+            await _botClient.AnswerCallbackQuery(callbackQuery.Id);
+        }
     }
 
-    private async Task HandleSubscribe(long chatId, long userId, string launchId, int messageId)
+    private async Task HandleSubscribe(long chatId, long userId, string launchId, int messageId, string callbackQueryId)
     {
         if (_database.IsUserSubscribed(userId, launchId))
         {
-            await _botClient.SendMessage(chatId, "✅ Вы уже подписаны на этот запуск!", disableNotification: false);
+            await _botClient.AnswerCallbackQuery(callbackQueryId, "✅ Вы уже подписаны на этот запуск!");
             return;
         }
 
         var launch = await _launchService.GetLaunchByIdAsync(launchId);
-        
+
         if (launch == null)
         {
-            await _botClient.SendMessage(chatId, "❌ Запуск не найден.", disableNotification: false);
+            await _botClient.AnswerCallbackQuery(callbackQueryId, "❌ Запуск не найден.", showAlert: true);
             return;
         }
 
         var notificationTime = launch.LaunchTime.ToUniversalTime().AddMinutes(-30);
-        
+
         if (notificationTime <= DateTime.UtcNow)
         {
-            await _botClient.SendMessage(chatId, "❌ До этого запуска осталось менее 30 минут, подписаться невозможно.", disableNotification: false);
+            await _botClient.AnswerCallbackQuery(callbackQueryId, "❌ До этого запуска осталось менее 30 минут, подписаться невозможно.", showAlert: true);
             return;
         }
 
-        _database.AddSubscription(userId, launchId, notificationTime);
-        
-        await _botClient.SendMessage(chatId, 
-            $"✅ Подписка оформлена! Вы получите уведомление за 30 минут до запуска.\n" +
-            $"🕐 Время уведомления: {notificationTime:yyyy-MM-dd HH:mm} UTC", disableNotification: false);
+        _database.AddSubscription(userId, launchId, notificationTime, isAutomatic: false);
 
-        var updatedKeyboard = CreateSubscribedButton();
+        await _botClient.AnswerCallbackQuery(callbackQueryId, $"✅ Подписка оформлена! Уведомление: {notificationTime:dd.MM HH:mm} UTC");
+
+        var updatedKeyboard = CreateUnsubscribeButton(launchId, notificationTime);
         try
         {
             await _botClient.EditMessageReplyMarkup(chatId, messageId, replyMarkup: updatedKeyboard);
@@ -168,12 +189,38 @@ public class BotHandlers
         catch { }
     }
 
-    private string FormatLaunchMessage(Models.Launch launch, bool isPrevious = false)
+    private async Task HandleUnsubscribe(long chatId, long userId, string launchId, int messageId, string callbackQueryId)
+    {
+        if (!_database.IsUserSubscribed(userId, launchId))
+        {
+            await _botClient.AnswerCallbackQuery(callbackQueryId, "❌ Вы не подписаны на этот запуск.");
+            return;
+        }
+
+        var removed = _database.RemoveSubscription(userId, launchId);
+
+        if (removed)
+        {
+            await _botClient.AnswerCallbackQuery(callbackQueryId, "✅ Подписка отменена");
+
+            var updatedKeyboard = CreateSubscribeButton(launchId, userId);
+            try
+            {
+                await _botClient.EditMessageReplyMarkup(chatId, messageId, replyMarkup: updatedKeyboard);
+            }
+            catch { }
+        }
+        else
+        {
+            await _botClient.AnswerCallbackQuery(callbackQueryId, "❌ Ошибка при отмене подписки.", showAlert: true);
+        }
+    }
+
+    private string FormatLaunchMessage(Models.Launch launch)
     {
         var stars = new string('⭐', launch.SpectacleRating);
-        var emoji = isPrevious ? "✅" : "🚀";
 
-        var message = $"{emoji} {launch.Name}\n\n" +
+        var message = $"🚀 {launch.Name}\n\n" +
                      $"Ракета: {launch.RocketName}\n" +
                      $"Стартовая площадка: {launch.LaunchPad}\n" +
                      $"🕐 Время: {launch.LaunchTime:yyyy-MM-dd HH:mm} UTC\n" +
@@ -189,7 +236,7 @@ public class BotHandlers
 
         if (!string.IsNullOrEmpty(launch.LiveStreamUrl))
         {
-            message += $"\n\n🎥 {(isPrevious ? "Повтор" : "Прямая трансляция")}: {launch.LiveStreamUrl}";
+            message += $"\n\n🎥 Прямая трансляция: {launch.LiveStreamUrl}";
         }
 
         return message;
@@ -198,17 +245,111 @@ public class BotHandlers
     private InlineKeyboardMarkup CreateSubscribeButton(string launchId, long userId)
     {
         var isSubscribed = _database.IsUserSubscribed(userId, launchId);
-        var buttonText = isSubscribed ? "✅ Подписан" : "🔔 Подписаться на уведомление";
-        
+
+        if (isSubscribed)
+        {
+            var subscription = _database.GetSubscriptionByUserAndLaunch(userId, launchId);
+            if (subscription != null)
+            {
+                var notificationTimeStr = subscription.NotificationTime.ToString("dd.MM HH:mm");
+                return new InlineKeyboardMarkup(
+                    InlineKeyboardButton.WithCallbackData($"❌ Отписаться (🕐 {notificationTimeStr})", $"unsubscribe_{launchId}")
+                );
+            }
+            return new InlineKeyboardMarkup(
+                InlineKeyboardButton.WithCallbackData("❌ Отписаться", $"unsubscribe_{launchId}")
+            );
+        }
+        else
+        {
+            return new InlineKeyboardMarkup(
+                InlineKeyboardButton.WithCallbackData("🔔 Подписаться на уведомление", $"subscribe_{launchId}")
+            );
+        }
+    }
+
+    private InlineKeyboardMarkup CreateUnsubscribeButton(string launchId, DateTime notificationTime)
+    {
+        var notificationTimeStr = notificationTime.ToString("dd.MM HH:mm");
         return new InlineKeyboardMarkup(
-            InlineKeyboardButton.WithCallbackData(buttonText, $"subscribe_{launchId}")
+            InlineKeyboardButton.WithCallbackData($"❌ Отписаться (🕐 {notificationTimeStr})", $"unsubscribe_{launchId}")
         );
     }
 
-    private InlineKeyboardMarkup CreateSubscribedButton()
+    private async Task HandlePreferenceChange(long chatId, long userId, string data, int messageId, string callbackQueryId)
     {
-        return new InlineKeyboardMarkup(
-            InlineKeyboardButton.WithCallbackData("✅ Подписан", "subscribed")
-        );
+        var preference = data switch
+        {
+            "pref_all" => NotificationPreference.AllLaunches,
+            "pref_5stars" => NotificationPreference.FiveStarsOnly,
+            "pref_4plus" => NotificationPreference.FourStarsAndAbove,
+            "pref_none" => NotificationPreference.None,
+            _ => NotificationPreference.None
+        };
+
+        _database.SetUserPreference(userId, preference);
+
+        await _botClient.AnswerCallbackQuery(callbackQueryId, $"✅ Настройка сохранена: {FormatPreference(preference)}");
+
+        var message = "⚙️ Настройки автоматических уведомлений\n\n" +
+                     "Выберите, о каких запусках вы хотите получать автоматические уведомления за 30 минут до старта:\n\n" +
+                     $"Текущая настройка: {FormatPreference(preference)}";
+
+        var keyboard = CreateSettingsKeyboard(preference);
+
+        try
+        {
+            await _botClient.EditMessageText(chatId, messageId, message, replyMarkup: keyboard);
+        }
+        catch { }
+    }
+
+    private InlineKeyboardMarkup CreateSettingsKeyboard(NotificationPreference currentPreference)
+    {
+        var buttons = new List<InlineKeyboardButton[]>
+        {
+            new[]
+            {
+                InlineKeyboardButton.WithCallbackData(
+                    currentPreference == NotificationPreference.AllLaunches ? "✅ Все запуски" : "Все запуски",
+                    "pref_all"
+                )
+            },
+            new[]
+            {
+                InlineKeyboardButton.WithCallbackData(
+                    currentPreference == NotificationPreference.FiveStarsOnly ? "✅ Только 5⭐" : "Только 5⭐",
+                    "pref_5stars"
+                )
+            },
+            new[]
+            {
+                InlineKeyboardButton.WithCallbackData(
+                    currentPreference == NotificationPreference.FourStarsAndAbove ? "✅ 4⭐ и выше" : "4⭐ и выше",
+                    "pref_4plus"
+                )
+            },
+            new[]
+            {
+                InlineKeyboardButton.WithCallbackData(
+                    currentPreference == NotificationPreference.None ? "✅ Не получать" : "Не получать",
+                    "pref_none"
+                )
+            }
+        };
+
+        return new InlineKeyboardMarkup(buttons);
+    }
+
+    private string FormatPreference(NotificationPreference preference)
+    {
+        return preference switch
+        {
+            NotificationPreference.AllLaunches => "🔔 Все запуски",
+            NotificationPreference.FiveStarsOnly => "⭐⭐⭐⭐⭐ Только 5 звёзд",
+            NotificationPreference.FourStarsAndAbove => "⭐⭐⭐⭐ 4 звезды и выше",
+            NotificationPreference.None => "🔕 Не получать автоматические уведомления",
+            _ => "🔕 Не настроено"
+        };
     }
 }

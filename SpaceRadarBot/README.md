@@ -5,18 +5,35 @@ A Telegram bot for tracking upcoming space launches with notification support.
 ## Features
 
 - View next 5 upcoming space launches
-- View last 5 completed launches
 - Subscribe to launch notifications (30 minutes before liftoff)
+- **Automatic notification preferences** - Set your preference once and get notified about all matching launches:
+  - All launches
+  - Only 5-star launches (most spectacular)
+  - 4-star and above launches
+- Manual subscriptions for individual launches
 - Live stream links when available
 - Support for multiple users
+- Persistent main menu with bot commands
 
 ## Usage
 
+### Commands
+
 - `/start` - Get welcome message and instructions
 - `/next` - View next 5 upcoming launches with subscription buttons
-- `/previous` - View last 5 completed launches
+- `/settings` - Configure automatic notification preferences
 
-Click the "Subscribe for notification" button under any upcoming launch to receive a notification 30 minutes before liftoff.
+### Notification Options
+
+1. **Manual Subscriptions**: Click the "🔔 Subscribe for notification" button under any upcoming launch to receive a notification 30 minutes before that specific launch.
+
+2. **Automatic Subscriptions**: Use `/settings` to set your preference:
+   - **All launches** - Get notified about every upcoming launch
+   - **Only 5⭐** - Get notified only about the most spectacular launches
+   - **4⭐ and above** - Get notified about highly rated launches
+   - **None** - Only use manual subscriptions
+
+Once you set a preference, you'll automatically receive notifications for all matching launches without having to subscribe manually!
 
 ## Architecture
 
@@ -26,13 +43,15 @@ SpaceRadarBot/
 ├── Handlers/
 │   └── BotHandlers.cs      # Telegram command and callback handlers
 ├── Services/
-│   ├── LaunchService.cs    # Fetches launch data from API
+│   ├── LaunchService.cs    # Fetches launch data from cache
+│   ├── LaunchSyncService.cs # Syncs launches from API
 │   └── NotificationService.cs # Background notification sender
 ├── Data/
 │   └── DatabaseService.cs  # LiteDB database access
 └── Models/
     ├── Launch.cs           # Launch data model
     ├── Subscription.cs     # Subscription data model
+    ├── UserPreference.cs   # User notification preferences
     └── LaunchLibraryModels.cs # API response models
 ```
 

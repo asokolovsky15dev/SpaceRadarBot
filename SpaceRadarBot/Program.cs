@@ -39,6 +39,8 @@ var receiverOptions = new ReceiverOptions
     AllowedUpdates = []
 };
 
+await SetupBotCommands(botClient);
+
 botClient.StartReceiving(
     async (bot, update, ct) => await botHandlers.HandleUpdateAsync(update),
     (bot, ex, ct) =>
@@ -72,3 +74,17 @@ catch (TaskCanceledException)
 launchSyncService.Stop();
 notificationService.Stop();
 Console.WriteLine("Bot stopped.");
+
+return;
+
+static async Task SetupBotCommands(ITelegramBotClient botClient)
+{
+    var commands = new[]
+    {
+        new BotCommand { Command = "next", Description = "Показать следующие 5 предстоящих запусков" },
+        new BotCommand { Command = "settings", Description = "Настроить автоматические уведомления" }
+    };
+
+    await botClient.SetMyCommands(commands);
+    Console.WriteLine("✅ Bot menu commands configured");
+}

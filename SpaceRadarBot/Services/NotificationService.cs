@@ -1,4 +1,5 @@
 using SpaceRadarBot.Data;
+using SpaceRadarBot.Models;
 using Telegram.Bot;
 
 namespace SpaceRadarBot.Services;
@@ -31,6 +32,19 @@ public class NotificationService
     }
 
     private async Task CheckAndSendNotifications()
+    {
+        try
+        {
+            await ProcessManualSubscriptions();
+            await ProcessAutomaticSubscriptions();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error in notification service: {ex.Message}");
+        }
+    }
+
+    private async Task ProcessManualSubscriptions()
     {
         try
         {
@@ -82,11 +96,60 @@ public class NotificationService
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error in notification service: {ex.Message}");
+            Console.WriteLine($"Error processing manual subscriptions: {ex.Message}");
         }
     }
 
-    private string FormatNotificationMessage(Models.Launch launch)
+    private async Task ProcessAutomaticSubscriptions()
+    {
+        try
+        {
+            var upcomingLaunches = await _launchService.GetAllUpcomingLaunchesAsync();
+            var usersWithPreferences = _database.GetUsersWithActivePreferences();
+
+            foreach (var userId in usersWithPreferences)
+            {
+                var preference = _database.GetUserPreference(userId);
+
+                if (preference == NotificationPreference.None)
+                    continue;
+
+                foreach (var launch in upcomingLaunches)
+                {
+                    if (!ShouldNotifyUser(preference, launch.SpectacleRating))
+                        continue;
+
+                    if (_database.IsUserSubscribed(userId, launch.Id))
+                        continue;
+
+                    var notificationTime = launch.LaunchTime.ToUniversalTime().AddMinutes(-30);
+
+                    if (notificationTime <= DateTime.UtcNow)
+                        continue;
+
+                    _database.AddSubscription(userId, launch.Id, notificationTime, isAutomatic: true);
+                    Console.WriteLine($"🔔 Auto-subscribed user {userId} to launch {launch.Name} based on preference {preference}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error processing automatic subscriptions: {ex.Message}");
+        }
+    }
+
+    private bool ShouldNotifyUser(NotificationPreference preference, int spectacleRating)
+    {
+        return preference switch
+        {
+            NotificationPreference.AllLaunches => true,
+            NotificationPreference.FiveStarsOnly => spectacleRating == 5,
+            NotificationPreference.FourStarsAndAbove => spectacleRating >= 4,
+            _ => false
+        };
+    }
+
+    private string FormatNotificationMessage(Launch launch)
     {
         var stars = new string('⭐', launch.SpectacleRating);
 

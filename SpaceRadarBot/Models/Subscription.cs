@@ -7,4 +7,5 @@ public class Subscription
     public string LaunchId { get; set; } = string.Empty;
     public DateTime NotificationTime { get; set; }
     public bool NotificationSent { get; set; }
+    public bool IsAutomatic { get; set; }
 }
