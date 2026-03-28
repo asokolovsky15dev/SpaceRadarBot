@@ -12,15 +12,18 @@ public class BotHandlers
     private readonly ITelegramBotClient _botClient;
     private readonly LaunchService _launchService;
     private readonly DatabaseService _database;
+    private readonly NotificationService _notificationService;
 
     public BotHandlers(
         ITelegramBotClient botClient,
         LaunchService launchService,
-        DatabaseService database)
+        DatabaseService database,
+        NotificationService notificationService)
     {
         _botClient = botClient;
         _launchService = launchService;
         _database = database;
+        _notificationService = notificationService;
     }
 
     public async Task HandleUpdateAsync(Update update)
@@ -288,6 +291,11 @@ public class BotHandlers
         };
 
         _database.SetUserPreference(userId, preference);
+
+        if (preference != NotificationPreference.None)
+        {
+            await _notificationService.CreateAutomaticSubscriptionsForUser(userId);
+        }
 
         await _botClient.AnswerCallbackQuery(callbackQueryId, $"✅ Настройка сохранена: {FormatPreference(preference)}");
 

@@ -109,32 +109,49 @@ public class NotificationService
 
             foreach (var userId in usersWithPreferences)
             {
-                var preference = _database.GetUserPreference(userId);
-
-                if (preference == NotificationPreference.None)
-                    continue;
-
-                foreach (var launch in upcomingLaunches)
-                {
-                    if (!ShouldNotifyUser(preference, launch.SpectacleRating))
-                        continue;
-
-                    if (_database.IsUserSubscribed(userId, launch.Id))
-                        continue;
-
-                    var notificationTime = launch.LaunchTime.ToUniversalTime().AddMinutes(-30);
-
-                    if (notificationTime <= DateTime.UtcNow)
-                        continue;
-
-                    _database.AddSubscription(userId, launch.Id, notificationTime, isAutomatic: true);
-                    Console.WriteLine($"🔔 Auto-subscribed user {userId} to launch {launch.Name} based on preference {preference}");
-                }
+                await CreateAutomaticSubscriptionsForUser(userId, upcomingLaunches);
             }
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Error processing automatic subscriptions: {ex.Message}");
+        }
+    }
+
+    public async Task CreateAutomaticSubscriptionsForUser(long userId, List<Launch>? launches = null)
+    {
+        try
+        {
+            var preference = _database.GetUserPreference(userId);
+
+            if (preference == NotificationPreference.None)
+                return;
+
+            var upcomingLaunches = launches ?? await _launchService.GetAllUpcomingLaunchesAsync();
+
+            foreach (var launch in upcomingLaunches)
+            {
+                if (!ShouldNotifyUser(preference, launch.SpectacleRating))
+                    continue;
+
+                if (_database.IsUserSubscribed(userId, launch.Id))
+                    continue;
+
+                if (_database.IsBlacklisted(userId, launch.Id))
+                    continue;
+
+                var notificationTime = launch.LaunchTime.ToUniversalTime().AddMinutes(-30);
+
+                if (notificationTime <= DateTime.UtcNow)
+                    continue;
+
+                _database.AddSubscription(userId, launch.Id, notificationTime, isAutomatic: true);
+                Console.WriteLine($"🔔 Auto-subscribed user {userId} to launch {launch.Name} based on preference {preference}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error creating automatic subscriptions for user {userId}: {ex.Message}");
         }
     }
 

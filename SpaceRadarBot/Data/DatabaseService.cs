@@ -21,6 +21,10 @@ public class DatabaseService
 
         var userPreferences = db.GetCollection<UserPreference>("userPreferences");
         userPreferences.EnsureIndex(x => x.UserId);
+
+        var userBlacklist = db.GetCollection<UserBlacklist>("userBlacklist");
+        userBlacklist.EnsureIndex(x => x.UserId);
+        userBlacklist.EnsureIndex(x => x.LaunchId);
     }
 
     public void UpsertLaunch(Launch launch)
@@ -148,6 +152,12 @@ public class DatabaseService
         if (subscription != null)
         {
             subscriptions.Delete(subscription.Id);
+
+            if (!subscription.IsAutomatic)
+            {
+                AddToBlacklist(userId, launchId);
+            }
+
             return true;
         }
 
@@ -179,20 +189,74 @@ public class DatabaseService
             });
         }
 
-        RemoveAutomaticSubscriptions(userId);
+        RemoveIncompatibleAutomaticSubscriptions(userId, preference);
+
+        if (preference == NotificationPreference.None)
+        {
+            ClearUserBlacklist(userId);
+        }
     }
 
-    public void RemoveAutomaticSubscriptions(long userId)
+    public void RemoveIncompatibleAutomaticSubscriptions(long userId, NotificationPreference newPreference)
     {
         using var db = new LiteDatabase(_connectionString);
         var subscriptions = db.GetCollection<Subscription>("subscriptions");
+        var launches = db.GetCollection<Launch>("launches");
 
-        var automaticSubscriptions = subscriptions.Find(s => s.UserId == userId && s.IsAutomatic && !s.NotificationSent);
+        var automaticSubscriptions = subscriptions.Find(s => s.UserId == userId && s.IsAutomatic && !s.NotificationSent).ToList();
 
         foreach (var subscription in automaticSubscriptions)
         {
-            subscriptions.Delete(subscription.Id);
+            var launch = launches.FindOne(l => l.Id == subscription.LaunchId);
+
+            if (launch == null || !MatchesPreference(newPreference, launch.SpectacleRating))
+            {
+                subscriptions.Delete(subscription.Id);
+            }
         }
+    }
+
+    private bool MatchesPreference(NotificationPreference preference, int spectacleRating)
+    {
+        return preference switch
+        {
+            NotificationPreference.AllLaunches => true,
+            NotificationPreference.FiveStarsOnly => spectacleRating == 5,
+            NotificationPreference.FourStarsAndAbove => spectacleRating >= 4,
+            NotificationPreference.None => false,
+            _ => false
+        };
+    }
+
+    public void AddToBlacklist(long userId, string launchId)
+    {
+        using var db = new LiteDatabase(_connectionString);
+        var blacklist = db.GetCollection<UserBlacklist>("userBlacklist");
+
+        var existing = blacklist.FindOne(b => b.UserId == userId && b.LaunchId == launchId);
+        if (existing != null)
+            return;
+
+        blacklist.Insert(new UserBlacklist
+        {
+            UserId = userId,
+            LaunchId = launchId,
+            CreatedAt = DateTime.UtcNow
+        });
+    }
+
+    public bool IsBlacklisted(long userId, string launchId)
+    {
+        using var db = new LiteDatabase(_connectionString);
+        var blacklist = db.GetCollection<UserBlacklist>("userBlacklist");
+        return blacklist.Exists(b => b.UserId == userId && b.LaunchId == launchId);
+    }
+
+    public void ClearUserBlacklist(long userId)
+    {
+        using var db = new LiteDatabase(_connectionString);
+        var blacklist = db.GetCollection<UserBlacklist>("userBlacklist");
+        blacklist.DeleteMany(b => b.UserId == userId);
     }
 
     public NotificationPreference GetUserPreference(long userId)
