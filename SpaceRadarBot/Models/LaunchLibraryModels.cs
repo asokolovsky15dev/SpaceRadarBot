@@ -31,8 +31,35 @@ public class LaunchLibraryLaunch
     [JsonPropertyName("webcast_live")]
     public bool WebcastLive { get; set; }
 
-    [JsonPropertyName("vidURLs")]
-    public List<string>? VidURLs { get; set; }
+    [JsonPropertyName("vid_urls")]
+    public List<VideoUrl>? VidUrls { get; set; }
+
+    [JsonPropertyName("launch_service_provider")]
+    public LaunchServiceProvider? LaunchServiceProvider { get; set; }
+}
+
+public class LaunchServiceProvider
+{
+    [JsonPropertyName("country")]
+    public List<CountryInfo>? Countries { get; set; }
+}
+
+public class CountryInfo
+{
+    [JsonPropertyName("alpha_2_code")]
+    public string? Alpha2Code { get; set; }
+}
+
+public class VideoUrl
+{
+    [JsonPropertyName("priority")]
+    public int Priority { get; set; }
+
+    [JsonPropertyName("url")]
+    public string? Url { get; set; }
+
+    [JsonPropertyName("title")]
+    public string? Title { get; set; }
 }
 
 public class RocketInfo

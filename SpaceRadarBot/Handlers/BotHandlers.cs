@@ -98,7 +98,7 @@ public class BotHandlers
             var message = FormatLaunchMessage(launch);
             var keyboard = CreateSubscribeButton(launch.Id, userId);
 
-            await _botClient.SendMessage(chatId, message, replyMarkup: keyboard, disableNotification: false);
+            await _botClient.SendMessage(chatId, message, replyMarkup: keyboard, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown, disableNotification: false);
             await Task.Delay(50);
         }
     }
@@ -222,27 +222,44 @@ public class BotHandlers
     private string FormatLaunchMessage(Models.Launch launch)
     {
         var stars = new string('⭐', launch.SpectacleRating);
+        var country = GetCountryDisplay(launch.CountryCode);
 
-        var message = $"🚀 {launch.Name}\n\n" +
-                     $"Ракета: {launch.RocketName}\n" +
-                     $"Стартовая площадка: {launch.LaunchPad}\n" +
-                     $"🕐 Время: {launch.LaunchTime:yyyy-MM-dd HH:mm} UTC\n" +
-                     $"Зрелищность: {stars}";
+        var message = $"🚀 *{launch.Name}*\n\n" +
+                     $"📍 {country}\n" +
+                     $"🕐 {launch.LaunchTime:dd MMM yyyy, HH:mm} UTC\n" +
+                     $"✨ {stars}";
 
         if (!string.IsNullOrEmpty(launch.Description))
         {
-            var shortDescription = launch.Description.Length > 200 
-                ? launch.Description.Substring(0, 200) + "..." 
-                : launch.Description;
-            message += $"\n\n📝 {shortDescription}";
-        }
-
-        if (!string.IsNullOrEmpty(launch.LiveStreamUrl))
-        {
-            message += $"\n\n🎥 Прямая трансляция: {launch.LiveStreamUrl}";
+            message += $"\n\n{launch.Description}";
         }
 
         return message;
+    }
+
+    private string GetCountryDisplay(string? countryCode)
+    {
+        if (string.IsNullOrEmpty(countryCode))
+            return "🌍 Unknown";
+
+        return countryCode.ToUpper() switch
+        {
+            "US" => "🇺🇸 USA",
+            "RU" => "🇷🇺 Russia",
+            "CN" => "🇨🇳 China",
+            "GF" => "🇪🇺 French Guiana",
+            "IN" => "🇮🇳 India",
+            "JP" => "🇯🇵 Japan",
+            "NZ" => "🇳🇿 New Zealand",
+            "KZ" => "🇰🇿 Kazakhstan",
+            "FR" => "🇫🇷 France",
+            "GB" => "🇬🇧 United Kingdom",
+            "IT" => "🇮🇹 Italy",
+            "IR" => "🇮🇷 Iran",
+            "KR" => "🇰🇷 South Korea",
+            "IL" => "🇮🇱 Israel",
+            _ => $"🌍 {countryCode}"
+        };
     }
 
     private InlineKeyboardMarkup CreateSubscribeButton(string launchId, long userId)

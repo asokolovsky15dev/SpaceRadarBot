@@ -78,7 +78,7 @@ public class NotificationService
 
                     try
                     {
-                        await _botClient.SendMessage(subscription.UserId, message, disableNotification: false);
+                        await _botClient.SendMessage(subscription.UserId, message, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown, disableNotification: false);
                         _database.MarkNotificationSent(subscription.Id);
                         Console.WriteLine($"✅ Notification sent to user {subscription.UserId} for launch {launch.Name}");
                     }
@@ -169,27 +169,49 @@ public class NotificationService
     private string FormatNotificationMessage(Launch launch)
     {
         var stars = new string('⭐', launch.SpectacleRating);
+        var country = GetCountryDisplay(launch.CountryCode);
 
-        var message = $"🚀 ВНИМАНИЕ! ЗАПУСК ЧЕРЕЗ 30 МИНУТ!\n\n" +
-                     $"Миссия: {launch.Name}\n" +
-                     $"Ракета: {launch.RocketName}\n" +
-                     $"Стартовая площадка: {launch.LaunchPad}\n" +
-                     $"🕐 Время: {launch.LaunchTime:yyyy-MM-dd HH:mm} UTC\n" +
-                     $"Зрелищность: {stars}";
+        var message = $"🚀 *ЗАПУСК ЧЕРЕЗ 30 МИНУТ!*\n\n" +
+                     $"*{launch.Name}*\n\n" +
+                     $"📍 {country}\n" +
+                     $"🕐 {launch.LaunchTime:dd MMM yyyy, HH:mm} UTC\n" +
+                     $"✨ {stars}";
 
         if (!string.IsNullOrEmpty(launch.Description))
         {
-            var shortDescription = launch.Description.Length > 150 
-                ? launch.Description.Substring(0, 150) + "..." 
-                : launch.Description;
-            message += $"\n\n📝 {shortDescription}";
+            message += $"\n\n{launch.Description}";
         }
 
         if (!string.IsNullOrEmpty(launch.LiveStreamUrl))
         {
-            message += $"\n\n🎥 Смотреть прямой эфир: {launch.LiveStreamUrl}";
+            message += $"\n\n🎥 [Смотреть прямой эфир]({launch.LiveStreamUrl})";
         }
 
         return message;
+    }
+
+    private string GetCountryDisplay(string? countryCode)
+    {
+        if (string.IsNullOrEmpty(countryCode))
+            return "🌍 Unknown";
+
+        return countryCode.ToUpper() switch
+        {
+            "US" => "🇺🇸 USA",
+            "RU" => "🇷🇺 Russia",
+            "CN" => "🇨🇳 China",
+            "GF" => "🇪🇺 French Guiana",
+            "IN" => "🇮🇳 India",
+            "JP" => "🇯🇵 Japan",
+            "NZ" => "🇳🇿 New Zealand",
+            "KZ" => "🇰🇿 Kazakhstan",
+            "FR" => "🇫🇷 France",
+            "GB" => "🇬🇧 United Kingdom",
+            "IT" => "🇮🇹 Italy",
+            "IR" => "🇮🇷 Iran",
+            "KR" => "🇰🇷 South Korea",
+            "IL" => "🇮🇱 Israel",
+            _ => $"🌍 {countryCode}"
+        };
     }
 }
