@@ -93,4 +93,19 @@ public class MissionInfo
 {
     [JsonPropertyName("description")]
     public string? Description { get; set; }
+
+    [JsonPropertyName("orbit")]
+    public OrbitInfo? Orbit { get; set; }
+}
+
+public class OrbitInfo
+{
+    [JsonPropertyName("id")]
+    public int Id { get; set; }
+
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    [JsonPropertyName("abbrev")]
+    public string? Abbrev { get; set; }
 }

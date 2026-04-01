@@ -62,6 +62,10 @@ public class BotHandlers
         {
             await HandleSettingsCommand(chatId, message.From?.Id ?? 0);
         }
+        else if (text.StartsWith("/timezone"))
+        {
+            await HandleTimezoneCommand(chatId, message.From?.Id ?? 0, text);
+        }
         else if (text.StartsWith("/count"))
         {
             await HandleCountCommand(chatId, message.From?.Id ?? 0);
@@ -74,7 +78,8 @@ public class BotHandlers
                            "Я помогу вам отслеживать предстоящие космические запуски и уведомлю вас перед стартом.\n\n" +
                            "Команды:\n" +
                            "/next - Показать следующие 5 предстоящих запусков\n" +
-                           "/settings - Настроить автоматические уведомления\n\n" +
+                           "/settings - Настроить автоматические уведомления\n" +
+                           "/timezone - Установить часовой пояс (например: /timezone +3)\n\n" +
                            "Вы можете подписаться на уведомления о запуске, нажав кнопку под каждым запуском. " +
                            "Вы получите уведомление за 30 минут до старта!";
 
@@ -93,9 +98,11 @@ public class BotHandlers
             return;
         }
 
+        var timezoneOffset = _database.GetUserTimezoneOffset(userId);
+
         foreach (var launch in launches)
         {
-            var message = FormatLaunchMessage(launch);
+            var message = FormatLaunchMessage(launch, timezoneOffset);
             var keyboard = CreateSubscribeButton(launch.Id, userId);
 
             await _botClient.SendMessage(chatId, message, replyMarkup: keyboard, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown, disableNotification: false);
@@ -128,6 +135,50 @@ public class BotHandlers
                      $"Текущая настройка: {FormatPreference(preference)}";
 
         await _botClient.SendMessage(chatId, message, disableNotification: false);
+    }
+
+    private async Task HandleTimezoneCommand(long chatId, long userId, string text)
+    {
+        var parts = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+        if (parts.Length < 2)
+        {
+            var currentOffset = _database.GetUserTimezoneOffset(userId);
+            var offsetDisplay = currentOffset >= 0 ? $"+{currentOffset}" : $"{currentOffset}";
+            var message = "🌍 Установка часового пояса\n\n" +
+                         $"Текущий часовой пояс: UTC{offsetDisplay}\n\n" +
+                         "Для изменения используйте:\n" +
+                         "/timezone +3\n" +
+                         "/timezone -5\n" +
+                         "/timezone 0\n\n" +
+                         "Например, для Москвы (MSK): /timezone +3";
+
+            await _botClient.SendMessage(chatId, message, disableNotification: false);
+            return;
+        }
+
+        var timezoneStr = parts[1];
+
+        if (int.TryParse(timezoneStr, out var timezoneOffset))
+        {
+            if (timezoneOffset < -12 || timezoneOffset > 14)
+            {
+                await _botClient.SendMessage(chatId, "❌ Неверный часовой пояс. Допустимые значения: от -12 до +14", disableNotification: false);
+                return;
+            }
+
+            _database.SetUserTimezoneOffset(userId, timezoneOffset);
+
+            var offsetDisplay = timezoneOffset >= 0 ? $"+{timezoneOffset}" : $"{timezoneOffset}";
+            var message = $"✅ Часовой пояс установлен: UTC{offsetDisplay}\n\n" +
+                         "Теперь все время будет отображаться в вашем часовом поясе!";
+
+            await _botClient.SendMessage(chatId, message, disableNotification: false);
+        }
+        else
+        {
+            await _botClient.SendMessage(chatId, "❌ Неверный формат. Используйте: /timezone +3 или /timezone -5", disableNotification: false);
+        }
     }
 
     private async Task HandleCallbackQueryAsync(CallbackQuery callbackQuery)
@@ -172,7 +223,7 @@ public class BotHandlers
             return;
         }
 
-        var notificationTime = launch.LaunchTime.ToUniversalTime().AddMinutes(-30);
+        var notificationTime = DateTime.SpecifyKind(launch.LaunchTime.ToUniversalTime().AddMinutes(-30), DateTimeKind.Utc);
 
         if (notificationTime <= DateTime.UtcNow)
         {
@@ -182,9 +233,13 @@ public class BotHandlers
 
         _database.AddSubscription(userId, launchId, notificationTime, isAutomatic: false);
 
-        await _botClient.AnswerCallbackQuery(callbackQueryId, $"✅ Подписка оформлена! Уведомление: {notificationTime:dd.MM HH:mm} UTC");
+        var timezoneOffset = _database.GetUserTimezoneOffset(userId);
+        var localNotificationTime = notificationTime.AddHours(timezoneOffset);
+        var timezoneDisplay = timezoneOffset >= 0 ? $"+{timezoneOffset}" : $"{timezoneOffset}";
 
-        var updatedKeyboard = CreateUnsubscribeButton(launchId, notificationTime);
+        await _botClient.AnswerCallbackQuery(callbackQueryId, $"✅ Подписка оформлена! Уведомление: {localNotificationTime:dd.MM HH:mm} (UTC{timezoneDisplay})");
+
+        var updatedKeyboard = CreateUnsubscribeButton(launchId, notificationTime, timezoneOffset);
         try
         {
             await _botClient.EditMessageReplyMarkup(chatId, messageId, replyMarkup: updatedKeyboard);
@@ -219,14 +274,15 @@ public class BotHandlers
         }
     }
 
-    private string FormatLaunchMessage(Models.Launch launch)
+    private string FormatLaunchMessage(Models.Launch launch, int timezoneOffset)
     {
         var stars = new string('⭐', launch.SpectacleRating);
         var country = GetCountryDisplay(launch.CountryCode);
+        var formattedTime = LaunchService.FormatLaunchTime(launch.LaunchTime, timezoneOffset);
 
         var message = $"🚀 *{launch.Name}*\n\n" +
                      $"📍 {country}\n" +
-                     $"🕐 {launch.LaunchTime:dd MMM yyyy, HH:mm} UTC\n" +
+                     $"🕐 {formattedTime}\n" +
                      $"✨ {stars}";
 
         if (!string.IsNullOrEmpty(launch.Description))
@@ -271,7 +327,11 @@ public class BotHandlers
             var subscription = _database.GetSubscriptionByUserAndLaunch(userId, launchId);
             if (subscription != null)
             {
-                var notificationTimeStr = subscription.NotificationTime.ToString("dd.MM HH:mm");
+                var timezoneOffset = _database.GetUserTimezoneOffset(userId);
+                var localNotificationTime = subscription.NotificationTime.AddHours(timezoneOffset);
+                var timezoneDisplay = timezoneOffset >= 0 ? $"+{timezoneOffset}" : $"{timezoneOffset}";
+                var notificationTimeStr = $"{localNotificationTime:dd.MM HH:mm} (UTC{timezoneDisplay})";
+
                 return new InlineKeyboardMarkup(
                     InlineKeyboardButton.WithCallbackData($"❌ Отписаться (🕐 {notificationTimeStr})", $"unsubscribe_{launchId}")
                 );
@@ -288,9 +348,12 @@ public class BotHandlers
         }
     }
 
-    private InlineKeyboardMarkup CreateUnsubscribeButton(string launchId, DateTime notificationTime)
+    private InlineKeyboardMarkup CreateUnsubscribeButton(string launchId, DateTime notificationTime, int timezoneOffset)
     {
-        var notificationTimeStr = notificationTime.ToString("dd.MM HH:mm");
+        var localNotificationTime = notificationTime.AddHours(timezoneOffset);
+        var timezoneDisplay = timezoneOffset >= 0 ? $"+{timezoneOffset}" : $"{timezoneOffset}";
+        var notificationTimeStr = $"{localNotificationTime:dd.MM HH:mm} (UTC{timezoneDisplay})";
+
         return new InlineKeyboardMarkup(
             InlineKeyboardButton.WithCallbackData($"❌ Отписаться (🕐 {notificationTimeStr})", $"unsubscribe_{launchId}")
         );

@@ -35,4 +35,11 @@ public class LaunchService
         var launch = _database.GetLaunchById(launchId);
         return Task.FromResult(launch);
     }
+
+    public static string FormatLaunchTime(DateTime utcTime, int timezoneOffset)
+    {
+        var localTime = utcTime.AddHours(timezoneOffset);
+        var timezoneDisplay = timezoneOffset >= 0 ? $"+{timezoneOffset}" : $"{timezoneOffset}";
+        return $"{localTime:dd MMM yyyy, HH:mm} (UTC{timezoneDisplay})";
+    }
 }

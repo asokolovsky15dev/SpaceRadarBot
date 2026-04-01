@@ -14,6 +14,7 @@ public class Launch
     public string? LiveStreamUrl { get; set; }
     public int SpectacleRating { get; set; }
     public string? Description { get; set; }
+    public string? Orbit { get; set; }
     public DateTime LastUpdated { get; set; }
     public DateTime CachedAt { get; set; }
 }

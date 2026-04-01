@@ -1,6 +1,6 @@
-using System.Text.Json;
 using SpaceRadarBot.Data;
 using SpaceRadarBot.Models;
+using System.Text.Json;
 
 namespace SpaceRadarBot.Services;
 
@@ -81,10 +81,11 @@ public class LaunchSyncService
                 RocketName = l.Rocket?.Configuration?.Name ?? "Unknown",
                 LaunchPad = FormatLaunchPad(l.Pad),
                 CountryCode = l.LaunchServiceProvider?.Countries?.FirstOrDefault()?.Alpha2Code,
-                LaunchTime = l.Net.ToUniversalTime(),
+                LaunchTime = DateTime.SpecifyKind(l.Net.ToUniversalTime(), DateTimeKind.Utc),
                 LiveStreamUrl = GetLiveStreamUrl(l),
                 SpectacleRating = CalculateSpectacleRating(l),
                 Description = l.Mission?.Description,
+                Orbit = l.Mission?.Orbit?.Abbrev,
                 LastUpdated = now,
                 CachedAt = now
             }).ToList();
@@ -113,10 +114,10 @@ public class LaunchSyncService
         if (launch.VidUrls == null || launch.VidUrls.Count == 0)
             return null;
 
-        // Get video with highest priority (highest number = highest priority)
+        // Get video with highest priority (lower number = higher priority)
         var highestPriorityVideo = launch.VidUrls
             .Where(v => !string.IsNullOrEmpty(v.Url))
-            .OrderByDescending(v => v.Priority)
+            .OrderBy(v => v.Priority)
             .FirstOrDefault();
 
         return highestPriorityVideo?.Url;
@@ -126,14 +127,50 @@ public class LaunchSyncService
     {
         int rating = 3;
 
+        var missionName = launch.Name?.ToLower() ?? "";
+        var description = launch.Mission?.Description?.ToLower() ?? "";
+
+        // Check for crewed missions (highest priority)
+        var crewedKeywords = new[] { "crew", "crewed", "astronaut", "cosmonaut", "human", "manned", "iss crew" };
+        if (crewedKeywords.Any(k => description.Contains(k) || missionName.Contains(k)))
+        {
+            return 5;
+        }
+
+        // Check for interplanetary/deep space missions
+        var orbit = launch.Mission?.Orbit?.Abbrev?.ToLower() ?? "";
+        var spectacularOrbits = new[]
+        {
+            "solar esc.", "jupiter orbit", "mars", "venus", "l2", "l1-point", "asteroid",
+            "lo", "lunar flyby", "lunar impactor", "mars flyby", "venus flyby",
+            "mercury flyby"
+        };
+
+        if (spectacularOrbits.Any(o => orbit.Contains(o.ToLower())))
+        {
+            return 5;
+        }
+
+        // Check rocket type
         var rocketName = launch.Rocket?.Configuration?.Name?.ToLower() ?? "";
 
-        if (rocketName.Contains("falcon heavy") || rocketName.Contains("starship"))
+        if (rocketName.Contains("falcon heavy") || rocketName.Contains("starship") || rocketName.Contains("sls") || rocketName.Contains("new glenn"))
             rating = 5;
-        else if (rocketName.Contains("falcon 9") || rocketName.Contains("ariane"))
+        else if (rocketName.Contains("falcon 9") && !missionName.Contains("starlink"))
             rating = 4;
-        else if (rocketName.Contains("soyuz") || rocketName.Contains("atlas"))
-            rating = 3;
+
+        // Upgrade rating for special missions (don't downgrade)
+        var firstFlightKeywords = new[] { "maiden flight", "first flight", "inaugural", "debut" };
+        if (firstFlightKeywords.Any(k => missionName.Contains(k) || description.Contains(k)))
+        {
+            rating = Math.Max(rating, 4);
+        }
+
+        var demoFlightKeywords = new[] { "demo flight", "test flight", "demonstration" };
+        if (demoFlightKeywords.Any(k => missionName.Contains(k) || description.Contains(k)))
+        {
+            rating = Math.Max(rating, 4);
+        }
 
         return Math.Max(1, Math.Min(5, rating));
     }

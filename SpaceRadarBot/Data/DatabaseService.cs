@@ -7,6 +7,8 @@ public class DatabaseService
 {
     private readonly string _connectionString;
 
+    public string ConnectionString => _connectionString;
+
     public DatabaseService(string dbPath = "spaceradar.db")
     {
         _connectionString = dbPath;
@@ -38,9 +40,39 @@ public class DatabaseService
     {
         using var db = new LiteDatabase(_connectionString);
         var launches = db.GetCollection<Launch>("launches");
+        var subscriptions = db.GetCollection<Subscription>("subscriptions");
 
         foreach (var launch in launchList)
         {
+            var existingLaunch = launches.FindOne(l => l.Id == launch.Id);
+
+            if (existingLaunch != null)
+            {
+                var timeDifference = Math.Abs((existingLaunch.LaunchTime - launch.LaunchTime).TotalMinutes);
+
+                if (timeDifference > 5)
+                {
+                    var newNotificationTime = DateTime.SpecifyKind(
+                        launch.LaunchTime.ToUniversalTime().AddMinutes(-30), 
+                        DateTimeKind.Utc);
+
+                    var affectedSubscriptions = subscriptions
+                        .Find(s => s.LaunchId == launch.Id && !s.NotificationSent)
+                        .ToList();
+
+                    foreach (var subscription in affectedSubscriptions)
+                    {
+                        subscription.NotificationTime = newNotificationTime;
+                        subscriptions.Update(subscription);
+                    }
+
+                    if (affectedSubscriptions.Count > 0)
+                    {
+                        Console.WriteLine($"🔔 Launch time changed for {launch.Name}. Rescheduled {affectedSubscriptions.Count} notification(s) to {newNotificationTime:HH:mm:ss} UTC");
+                    }
+                }
+            }
+
             launches.Upsert(launch);
         }
     }
@@ -266,6 +298,42 @@ public class DatabaseService
 
         var preference = userPreferences.FindOne(u => u.UserId == userId);
         return preference?.Preference ?? NotificationPreference.None;
+    }
+
+    public int GetUserTimezoneOffset(long userId)
+    {
+        using var db = new LiteDatabase(_connectionString);
+        var userPreferences = db.GetCollection<UserPreference>("userPreferences");
+
+        var preference = userPreferences.FindOne(u => u.UserId == userId);
+        return preference?.TimezoneOffset ?? 0;
+    }
+
+    public void SetUserTimezoneOffset(long userId, int timezoneOffset)
+    {
+        using var db = new LiteDatabase(_connectionString);
+        var userPreferences = db.GetCollection<UserPreference>("userPreferences");
+
+        var existing = userPreferences.FindOne(u => u.UserId == userId);
+        var now = DateTime.UtcNow;
+
+        if (existing != null)
+        {
+            existing.TimezoneOffset = timezoneOffset;
+            existing.UpdatedAt = now;
+            userPreferences.Update(existing);
+        }
+        else
+        {
+            userPreferences.Insert(new UserPreference
+            {
+                UserId = userId,
+                Preference = NotificationPreference.None,
+                TimezoneOffset = timezoneOffset,
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+        }
     }
 
     public List<long> GetUsersWithActivePreferences()

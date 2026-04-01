@@ -56,25 +56,8 @@ public class NotificationService
 
                 if (launch != null)
                 {
-                    var launchTimeUtc = launch.LaunchTime.ToUniversalTime();
-                    var notificationTimeUtc = launchTimeUtc.AddMinutes(-30);
-                    var now = DateTime.UtcNow;
-
-                    if (Math.Abs((notificationTimeUtc - subscription.NotificationTime).TotalMinutes) > 5)
-                    {
-                        Console.WriteLine($"⚠️ Launch time changed for {launch.Name}. Skipping old notification.");
-                        _database.MarkNotificationSent(subscription.Id);
-                        continue;
-                    }
-
-                    if (notificationTimeUtc > now.AddMinutes(5))
-                    {
-                        Console.WriteLine($"⏰ Launch {launch.Name} rescheduled. Too early to notify.");
-                        _database.MarkNotificationSent(subscription.Id);
-                        continue;
-                    }
-
-                    var message = FormatNotificationMessage(launch);
+                    var timezoneOffset = _database.GetUserTimezoneOffset(subscription.UserId);
+                    var message = FormatNotificationMessage(launch, timezoneOffset);
 
                     try
                     {
@@ -140,7 +123,7 @@ public class NotificationService
                 if (_database.IsBlacklisted(userId, launch.Id))
                     continue;
 
-                var notificationTime = launch.LaunchTime.ToUniversalTime().AddMinutes(-30);
+                var notificationTime = DateTime.SpecifyKind(launch.LaunchTime.ToUniversalTime().AddMinutes(-30), DateTimeKind.Utc);
 
                 if (notificationTime <= DateTime.UtcNow)
                     continue;
@@ -166,15 +149,16 @@ public class NotificationService
         };
     }
 
-    private string FormatNotificationMessage(Launch launch)
+    private string FormatNotificationMessage(Launch launch, int timezoneOffset)
     {
         var stars = new string('⭐', launch.SpectacleRating);
         var country = GetCountryDisplay(launch.CountryCode);
+        var formattedTime = LaunchService.FormatLaunchTime(launch.LaunchTime, timezoneOffset);
 
         var message = $"🚀 *ЗАПУСК ЧЕРЕЗ 30 МИНУТ!*\n\n" +
                      $"*{launch.Name}*\n\n" +
                      $"📍 {country}\n" +
-                     $"🕐 {launch.LaunchTime:dd MMM yyyy, HH:mm} UTC\n" +
+                     $"🕐 {formattedTime}\n" +
                      $"✨ {stars}";
 
         if (!string.IsNullOrEmpty(launch.Description))
