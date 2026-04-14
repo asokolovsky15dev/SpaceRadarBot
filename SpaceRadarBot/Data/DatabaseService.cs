@@ -71,6 +71,13 @@ public class DatabaseService
                         Console.WriteLine($"🔔 Launch time changed for {launch.Name}. Rescheduled {affectedSubscriptions.Count} notification(s) to {newNotificationTime:HH:mm:ss} UTC");
                     }
                 }
+
+                // Preserve manual rating override
+                if (existingLaunch.ManualRatingOverride)
+                {
+                    launch.SpectacleRating = existingLaunch.SpectacleRating;
+                    launch.ManualRatingOverride = true;
+                }
             }
 
             launches.Upsert(launch);
@@ -360,5 +367,38 @@ public class DatabaseService
         var pending = userSubscriptions.Count(s => !s.NotificationSent);
 
         return (total, manual, automatic, pending);
+    }
+
+    public bool UpdateSpectacleRating(string launchId, int rating)
+    {
+        using var db = new LiteDatabase(_connectionString);
+        var launches = db.GetCollection<Launch>("launches");
+
+        var launch = launches.FindOne(l => l.Id == launchId);
+        if (launch == null)
+            return false;
+
+        launch.SpectacleRating = rating;
+        launch.ManualRatingOverride = true;
+        launch.LastUpdated = DateTime.UtcNow;
+
+        return launches.Update(launch);
+    }
+
+    public List<Subscription> GetUserAutomaticSubscriptions(long userId)
+    {
+        using var db = new LiteDatabase(_connectionString);
+        var subscriptions = db.GetCollection<Subscription>("subscriptions");
+
+        return subscriptions
+            .Find(s => s.UserId == userId && s.IsAutomatic && !s.NotificationSent)
+            .ToList();
+    }
+
+    public void RemoveSubscriptionById(int subscriptionId)
+    {
+        using var db = new LiteDatabase(_connectionString);
+        var subscriptions = db.GetCollection<Subscription>("subscriptions");
+        subscriptions.Delete(subscriptionId);
     }
 }

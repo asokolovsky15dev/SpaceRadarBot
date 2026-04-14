@@ -92,6 +92,7 @@ public class NotificationService
 
             foreach (var userId in usersWithPreferences)
             {
+                await CleanupIncompatibleAutomaticSubscriptions(userId, upcomingLaunches);
                 await CreateAutomaticSubscriptionsForUser(userId, upcomingLaunches);
             }
         }
@@ -147,6 +148,36 @@ public class NotificationService
             NotificationPreference.FourStarsAndAbove => spectacleRating >= 4,
             _ => false
         };
+    }
+
+    private async Task CleanupIncompatibleAutomaticSubscriptions(long userId, List<Launch> upcomingLaunches)
+    {
+        try
+        {
+            var preference = _database.GetUserPreference(userId);
+
+            if (preference == NotificationPreference.None)
+                return;
+
+            var automaticSubscriptions = _database.GetUserAutomaticSubscriptions(userId);
+            var launchDict = upcomingLaunches.ToDictionary(l => l.Id);
+
+            foreach (var subscription in automaticSubscriptions)
+            {
+                if (!launchDict.TryGetValue(subscription.LaunchId, out var launch))
+                    continue;
+
+                if (!ShouldNotifyUser(preference, launch.SpectacleRating))
+                {
+                    _database.RemoveSubscriptionById(subscription.Id);
+                    Console.WriteLine($"🗑️ Removed automatic subscription for user {userId} from launch {launch.Name} (rating changed from user preference)");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error cleaning up automatic subscriptions for user {userId}: {ex.Message}");
+        }
     }
 
     private string FormatNotificationMessage(Launch launch, int timezoneOffset)

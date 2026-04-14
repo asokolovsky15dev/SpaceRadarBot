@@ -25,6 +25,28 @@ A Telegram bot for tracking upcoming space launches with notification support.
 - `/start` - Get welcome message and instructions
 - `/next` - View next 5 upcoming launches with subscription buttons
 - `/settings` - Configure automatic notification preferences
+- `/timezone` - Set your timezone (e.g., `/timezone +3` for Moscow)
+- `/count` - View your subscription statistics
+- `/setrating <launch_id> <1-5>` - **(Admin only)** Set spectacle rating manually
+
+### Admin Features
+
+Admins can manually override spectacle ratings for launches:
+- Use `/setrating <launch_id> <rating>` command to set rating from 1-5
+- Click rating buttons (1⭐-5⭐) under launches when using `/next`
+- Manual ratings are **preserved during syncs** and won't be overwritten
+- **Dynamic automatic subscriptions**: When you change a rating, automatic subscriptions are updated:
+  - ⬆️ **Increase rating** (3→4): Users with "4+ preference" are automatically subscribed
+  - ⬇️ **Decrease rating** (4→3): Users with "4+ preference" are automatically unsubscribed
+  - Updates happen within 1 minute via background service
+- Useful for correcting automatic ratings or highlighting special launches
+
+To enable admin access, add user IDs to `appsettings.json`:
+```json
+{
+  "AdminUserIds": [123456789, 987654321]
+}
+```
 
 ### Notification Options
 

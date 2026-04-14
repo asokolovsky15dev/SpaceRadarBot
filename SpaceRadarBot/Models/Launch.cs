@@ -13,6 +13,7 @@ public class Launch
     public DateTime LaunchTime { get; set; }
     public string? LiveStreamUrl { get; set; }
     public int SpectacleRating { get; set; }
+    public bool ManualRatingOverride { get; set; } = false;
     public string? Description { get; set; }
     public string? Orbit { get; set; }
 

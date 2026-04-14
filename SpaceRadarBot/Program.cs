@@ -29,7 +29,7 @@ launchSyncService.Start();
 
 var launchService = new LaunchService(database);
 var notificationService = new NotificationService(botClient, database, launchService);
-var botHandlers = new BotHandlers(botClient, launchService, database, notificationService);
+var botHandlers = new BotHandlers(botClient, launchService, database, notificationService, configuration);
 
 notificationService.Start();
 Console.WriteLine("✅ Notification service started");

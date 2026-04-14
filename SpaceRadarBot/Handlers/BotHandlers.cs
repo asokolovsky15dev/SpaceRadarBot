@@ -4,6 +4,7 @@ using SpaceRadarBot.Services;
 using Telegram.Bot;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.ReplyMarkups;
+using Microsoft.Extensions.Configuration;
 
 namespace SpaceRadarBot.Handlers;
 
@@ -13,17 +14,20 @@ public class BotHandlers
     private readonly LaunchService _launchService;
     private readonly DatabaseService _database;
     private readonly NotificationService _notificationService;
+    private readonly List<long> _adminUserIds;
 
     public BotHandlers(
         ITelegramBotClient botClient,
         LaunchService launchService,
         DatabaseService database,
-        NotificationService notificationService)
+        NotificationService notificationService,
+        IConfiguration configuration)
     {
         _botClient = botClient;
         _launchService = launchService;
         _database = database;
         _notificationService = notificationService;
+        _adminUserIds = configuration.GetSection("AdminUserIds").Get<List<long>>() ?? new List<long>();
     }
 
     public async Task HandleUpdateAsync(Update update)
@@ -69,6 +73,10 @@ public class BotHandlers
         else if (text.StartsWith("/count"))
         {
             await HandleCountCommand(chatId, message.From?.Id ?? 0);
+        }
+        else if (text.StartsWith("/setrating"))
+        {
+            await HandleSetRatingCommand(chatId, message.From?.Id ?? 0, text);
         }
     }
 
@@ -200,6 +208,10 @@ public class BotHandlers
         else if (data.StartsWith("pref_"))
         {
             await HandlePreferenceChange(chatId, userId, data, callbackQuery.Message?.MessageId ?? 0, callbackQuery.Id);
+        }
+        else if (data.StartsWith("rate_"))
+        {
+            await HandleRatingChange(chatId, userId, data, callbackQuery.Message?.MessageId ?? 0, callbackQuery.Id);
         }
         else
         {
@@ -351,6 +363,7 @@ public class BotHandlers
 
     private InlineKeyboardMarkup CreateSubscribeButton(string launchId, long userId)
     {
+        var buttons = new List<InlineKeyboardButton[]>();
         var isSubscribed = _database.IsUserSubscribed(userId, launchId);
 
         if (isSubscribed)
@@ -363,31 +376,55 @@ public class BotHandlers
                 var timezoneDisplay = timezoneOffset >= 0 ? $"+{timezoneOffset}" : $"{timezoneOffset}";
                 var notificationTimeStr = $"{localNotificationTime:dd.MM HH:mm} (UTC{timezoneDisplay})";
 
-                return new InlineKeyboardMarkup(
+                buttons.Add(new[]
+                {
                     InlineKeyboardButton.WithCallbackData($"❌ Отписаться (🕐 {notificationTimeStr})", $"unsubscribe_{launchId}")
-                );
+                });
             }
-            return new InlineKeyboardMarkup(
-                InlineKeyboardButton.WithCallbackData("❌ Отписаться", $"unsubscribe_{launchId}")
-            );
+            else
+            {
+                buttons.Add(new[]
+                {
+                    InlineKeyboardButton.WithCallbackData("❌ Отписаться", $"unsubscribe_{launchId}")
+                });
+            }
         }
         else
         {
-            return new InlineKeyboardMarkup(
+            buttons.Add(new[]
+            {
                 InlineKeyboardButton.WithCallbackData("🔔 Подписаться на уведомление", $"subscribe_{launchId}")
-            );
+            });
         }
+
+        if (IsAdmin(userId))
+        {
+            buttons.Add(new[]
+            {
+                InlineKeyboardButton.WithCallbackData("1⭐", $"rate_{launchId}_1"),
+                InlineKeyboardButton.WithCallbackData("2⭐", $"rate_{launchId}_2"),
+                InlineKeyboardButton.WithCallbackData("3⭐", $"rate_{launchId}_3"),
+                InlineKeyboardButton.WithCallbackData("4⭐", $"rate_{launchId}_4"),
+                InlineKeyboardButton.WithCallbackData("5⭐", $"rate_{launchId}_5")
+            });
+        }
+
+        return new InlineKeyboardMarkup(buttons);
     }
 
     private InlineKeyboardMarkup CreateUnsubscribeButton(string launchId, DateTime notificationTime, int timezoneOffset)
     {
+        var buttons = new List<InlineKeyboardButton[]>();
         var localNotificationTime = notificationTime.AddHours(timezoneOffset);
         var timezoneDisplay = timezoneOffset >= 0 ? $"+{timezoneOffset}" : $"{timezoneOffset}";
         var notificationTimeStr = $"{localNotificationTime:dd.MM HH:mm} (UTC{timezoneDisplay})";
 
-        return new InlineKeyboardMarkup(
+        buttons.Add(new[]
+        {
             InlineKeyboardButton.WithCallbackData($"❌ Отписаться (🕐 {notificationTimeStr})", $"unsubscribe_{launchId}")
-        );
+        });
+
+        return new InlineKeyboardMarkup(buttons);
     }
 
     private async Task HandlePreferenceChange(long chatId, long userId, string data, int messageId, string callbackQueryId)
@@ -470,5 +507,75 @@ public class BotHandlers
             NotificationPreference.None => "🔕 Не получать автоматические уведомления",
             _ => "🔕 Не настроено"
         };
+    }
+
+    private bool IsAdmin(long userId)
+    {
+        return _adminUserIds.Contains(userId);
+    }
+
+    private async Task HandleSetRatingCommand(long chatId, long userId, string text)
+    {
+        if (!IsAdmin(userId))
+        {
+            await _botClient.SendMessage(chatId, "❌ Недостаточно прав", disableNotification: false);
+            return;
+        }
+
+        var parts = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 3 || !int.TryParse(parts[2], out var rating) || rating < 1 || rating > 5)
+        {
+            await _botClient.SendMessage(chatId, "❌ Формат: /setrating <launch_id> <1-5>", disableNotification: false);
+            return;
+        }
+
+        var success = _database.UpdateSpectacleRating(parts[1], rating);
+        if (success)
+        {
+            var stars = new string('⭐', rating);
+            await _botClient.SendMessage(chatId, $"✅ Рейтинг обновлён: {stars}\n🔒 Установлен ручной приоритет (не будет изменён при синхронизации)", disableNotification: false);
+        }
+        else
+        {
+            await _botClient.SendMessage(chatId, "❌ Запуск не найден", disableNotification: false);
+        }
+    }
+
+    private async Task HandleRatingChange(long chatId, long userId, string data, int messageId, string callbackQueryId)
+    {
+        if (!IsAdmin(userId))
+        {
+            await _botClient.AnswerCallbackQuery(callbackQueryId, "❌ Недостаточно прав");
+            return;
+        }
+
+        var parts = data.Split('_');
+        var launchId = parts[1];
+        var rating = int.Parse(parts[2]);
+
+        var success = _database.UpdateSpectacleRating(launchId, rating);
+        if (success)
+        {
+            var stars = new string('⭐', rating);
+            await _botClient.AnswerCallbackQuery(callbackQueryId, $"✅ Рейтинг: {stars} 🔒", showAlert: true);
+
+            var launch = await _launchService.GetLaunchByIdAsync(launchId);
+            if (launch != null)
+            {
+                var timezoneOffset = _database.GetUserTimezoneOffset(userId);
+                var message = FormatLaunchMessage(launch, timezoneOffset);
+                var keyboard = CreateSubscribeButton(launchId, userId);
+
+                try
+                {
+                    await _botClient.EditMessageText(chatId, messageId, message, replyMarkup: keyboard, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown);
+                }
+                catch { }
+            }
+        }
+        else
+        {
+            await _botClient.AnswerCallbackQuery(callbackQueryId, "❌ Ошибка", showAlert: true);
+        }
     }
 }
