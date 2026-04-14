@@ -77,7 +77,7 @@ public class BotHandlers
         var welcomeMessage = "🚀 Добро пожаловать в Space Radar Bot!\n\n" +
                            "Я помогу вам отслеживать предстоящие космические запуски и уведомлю вас перед стартом.\n\n" +
                            "Команды:\n" +
-                           "/next - Показать следующие 5 предстоящих запусков\n" +
+                           "/next - Показать 5 предстоящих запусков\n" +
                            "/settings - Настроить автоматические уведомления\n" +
                            "/timezone - Установить часовой пояс (например: /timezone +3)\n\n" +
                            "Вы можете подписаться на уведомления о запуске, нажав кнопку под каждым запуском. " +
@@ -285,12 +285,43 @@ public class BotHandlers
                      $"🕐 {formattedTime}\n" +
                      $"✨ {stars}";
 
+        // Add booster information if available
+        if (!string.IsNullOrEmpty(launch.BoosterSerialNumber))
+        {
+            var flightInfo = "";
+            if (launch.BoosterFlightNumber.HasValue)
+            {
+                var flightNum = launch.BoosterFlightNumber.Value;
+                var flightOrdinal = FormatFlightNumber(flightNum);
+                flightInfo = $" ({flightOrdinal} полёт)";
+            }
+
+            var reusedIcon = launch.BoosterReused == true ? "♻️" : "🆕";
+            message += $"\n{reusedIcon} Бустер {launch.BoosterSerialNumber}{flightInfo}";
+
+            if (launch.LandingAttempt == true)
+            {
+                message += "\n🎯 Посадка: ожидается";
+            }
+        }
+
         if (!string.IsNullOrEmpty(launch.Description))
         {
             message += $"\n\n{launch.Description}";
         }
 
         return message;
+    }
+
+    private string FormatFlightNumber(int number)
+    {
+        return number switch
+        {
+            1 => "1-й",
+            2 => "2-й",
+            3 => "3-й",
+            _ => $"{number}-й"
+        };
     }
 
     private string GetCountryDisplay(string? countryCode)

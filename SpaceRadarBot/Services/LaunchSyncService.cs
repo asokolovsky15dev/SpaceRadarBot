@@ -74,20 +74,30 @@ public class LaunchSyncService
             }
 
             var now = DateTime.UtcNow;
-            var launches = data.Results.Select(l => new Launch
+            var launches = data.Results.Select(l =>
             {
-                Id = l.Id,
-                Name = l.Name,
-                RocketName = l.Rocket?.Configuration?.Name ?? "Unknown",
-                LaunchPad = FormatLaunchPad(l.Pad),
-                CountryCode = l.LaunchServiceProvider?.Countries?.FirstOrDefault()?.Alpha2Code,
-                LaunchTime = DateTime.SpecifyKind(l.Net.ToUniversalTime(), DateTimeKind.Utc),
-                LiveStreamUrl = GetLiveStreamUrl(l),
-                SpectacleRating = CalculateSpectacleRating(l),
-                Description = l.Mission?.Description,
-                Orbit = l.Mission?.Orbit?.Abbrev,
-                LastUpdated = now,
-                CachedAt = now
+                // Extract first booster information (most launches have one core)
+                var firstBooster = l.Rocket?.LauncherStage?.FirstOrDefault();
+
+                return new Launch
+                {
+                    Id = l.Id,
+                    Name = l.Name,
+                    RocketName = l.Rocket?.Configuration?.Name ?? "Unknown",
+                    LaunchPad = FormatLaunchPad(l.Pad),
+                    CountryCode = l.LaunchServiceProvider?.Countries?.FirstOrDefault()?.Alpha2Code,
+                    LaunchTime = DateTime.SpecifyKind(l.Net.ToUniversalTime(), DateTimeKind.Utc),
+                    LiveStreamUrl = GetLiveStreamUrl(l),
+                    SpectacleRating = CalculateSpectacleRating(l),
+                    Description = l.Mission?.Description,
+                    Orbit = l.Mission?.Orbit?.Abbrev,
+                    BoosterSerialNumber = firstBooster?.Launcher?.SerialNumber,
+                    BoosterFlightNumber = firstBooster?.LauncherFlightNumber,
+                    BoosterReused = firstBooster?.Reused,
+                    LandingAttempt = firstBooster?.Landing?.Attempt,
+                    LastUpdated = now,
+                    CachedAt = now
+                };
             }).ToList();
 
             Console.WriteLine($"📦 Fetched {launches.Count} launches");

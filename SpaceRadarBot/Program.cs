@@ -81,7 +81,7 @@ static async Task SetupBotCommands(ITelegramBotClient botClient)
 {
     var commands = new[]
     {
-        new BotCommand { Command = "next", Description = "Показать следующие 5 предстоящих запусков" },
+        new BotCommand { Command = "next", Description = "Показать 5 предстоящих запусков" },
         new BotCommand { Command = "settings", Description = "Настроить автоматические уведомления" },
         new BotCommand { Command = "timezone", Description = "Установить часовой пояс" }
     };

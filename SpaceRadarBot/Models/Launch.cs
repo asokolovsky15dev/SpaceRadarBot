@@ -15,6 +15,13 @@ public class Launch
     public int SpectacleRating { get; set; }
     public string? Description { get; set; }
     public string? Orbit { get; set; }
+
+    // Booster information
+    public string? BoosterSerialNumber { get; set; }
+    public int? BoosterFlightNumber { get; set; }
+    public bool? BoosterReused { get; set; }
+    public bool? LandingAttempt { get; set; }
+
     public DateTime LastUpdated { get; set; }
     public DateTime CachedAt { get; set; }
 }

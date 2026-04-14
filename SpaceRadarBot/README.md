@@ -5,6 +5,8 @@ A Telegram bot for tracking upcoming space launches with notification support.
 ## Features
 
 - View next 5 upcoming space launches
+- **Russian translation** - Launch descriptions are automatically translated from English to Russian
+- **Reusable rocket tracking** - See booster serial number, flight number, and landing attempt status
 - Subscribe to launch notifications (30 minutes before liftoff)
 - **Automatic notification preferences** - Set your preference once and get notified about all matching launches:
   - All launches
@@ -14,6 +16,7 @@ A Telegram bot for tracking upcoming space launches with notification support.
 - Live stream links when available
 - Support for multiple users
 - Persistent main menu with bot commands
+- Timezone support for personalized time display
 
 ## Usage
 

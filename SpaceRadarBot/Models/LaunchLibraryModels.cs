@@ -66,6 +66,9 @@ public class RocketInfo
 {
     [JsonPropertyName("configuration")]
     public RocketConfiguration? Configuration { get; set; }
+
+    [JsonPropertyName("launcher_stage")]
+    public List<LauncherStage>? LauncherStage { get; set; }
 }
 
 public class RocketConfiguration
@@ -108,4 +111,31 @@ public class OrbitInfo
 
     [JsonPropertyName("abbrev")]
     public string? Abbrev { get; set; }
+}
+
+public class LauncherStage
+{
+    [JsonPropertyName("reused")]
+    public bool? Reused { get; set; }
+
+    [JsonPropertyName("launcher_flight_number")]
+    public int? LauncherFlightNumber { get; set; }
+
+    [JsonPropertyName("launcher")]
+    public LauncherInfo? Launcher { get; set; }
+
+    [JsonPropertyName("landing")]
+    public LandingInfo? Landing { get; set; }
+}
+
+public class LauncherInfo
+{
+    [JsonPropertyName("serial_number")]
+    public string? SerialNumber { get; set; }
+}
+
+public class LandingInfo
+{
+    [JsonPropertyName("attempt")]
+    public bool? Attempt { get; set; }
 }
