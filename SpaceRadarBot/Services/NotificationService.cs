@@ -212,9 +212,13 @@ public class NotificationService
             }
         }
 
-        if (!string.IsNullOrEmpty(launch.Description))
+        // Show Russian description if available, otherwise fall back to English
+        var description = !string.IsNullOrEmpty(launch.DescriptionRu) 
+            ? $"{launch.DescriptionRu}\n\n_Переведено с помощью AI_" 
+            : launch.Description;
+        if (!string.IsNullOrEmpty(description))
         {
-            message += $"\n\n{launch.Description}";
+            message += $"\n\n{description}";
         }
 
         if (!string.IsNullOrEmpty(launch.LiveStreamUrl))

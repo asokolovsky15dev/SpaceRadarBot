@@ -96,8 +96,6 @@ public class BotHandlers
 
     private async Task HandleNextCommand(long chatId, long userId)
     {
-        await _botClient.SendMessage(chatId, "🔍 Загружаю предстоящие запуски...", disableNotification: false);
-
         var launches = await _launchService.GetUpcomingLaunchesAsync();
 
         if (launches.Count == 0)
@@ -110,8 +108,8 @@ public class BotHandlers
 
         foreach (var launch in launches)
         {
-            var message = FormatLaunchMessage(launch, timezoneOffset);
-            var keyboard = CreateSubscribeButton(launch.Id, userId);
+            var message = FormatLaunchMessage(launch, timezoneOffset, useRussian: true);
+            var keyboard = CreateSubscribeButton(launch.Id, userId, launch);
 
             await _botClient.SendMessage(chatId, message, replyMarkup: keyboard, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown, disableNotification: false);
             await Task.Delay(50);
@@ -213,6 +211,10 @@ public class BotHandlers
         {
             await HandleRatingChange(chatId, userId, data, callbackQuery.Message?.MessageId ?? 0, callbackQuery.Id);
         }
+        else if (data.StartsWith("lang_"))
+        {
+            await HandleLanguageToggle(chatId, userId, data, callbackQuery.Message?.MessageId ?? 0, callbackQuery.Id);
+        }
         else
         {
             await _botClient.AnswerCallbackQuery(callbackQuery.Id);
@@ -251,7 +253,8 @@ public class BotHandlers
 
         await _botClient.AnswerCallbackQuery(callbackQueryId, $"✅ Подписка оформлена! Уведомление: {localNotificationTime:dd.MM HH:mm} (UTC{timezoneDisplay})");
 
-        var updatedKeyboard = CreateUnsubscribeButton(launchId, notificationTime, timezoneOffset);
+        var updatedLaunch = await _launchService.GetLaunchByIdAsync(launchId);
+        var updatedKeyboard = CreateSubscribeButton(launchId, userId, updatedLaunch, showingRussian: true);
         try
         {
             await _botClient.EditMessageReplyMarkup(chatId, messageId, replyMarkup: updatedKeyboard);
@@ -273,7 +276,8 @@ public class BotHandlers
         {
             await _botClient.AnswerCallbackQuery(callbackQueryId, "✅ Подписка отменена");
 
-            var updatedKeyboard = CreateSubscribeButton(launchId, userId);
+            var updatedLaunch = await _launchService.GetLaunchByIdAsync(launchId);
+            var updatedKeyboard = CreateSubscribeButton(launchId, userId, updatedLaunch, showingRussian: true);
             try
             {
                 await _botClient.EditMessageReplyMarkup(chatId, messageId, replyMarkup: updatedKeyboard);
@@ -286,7 +290,7 @@ public class BotHandlers
         }
     }
 
-    private string FormatLaunchMessage(Models.Launch launch, int timezoneOffset)
+    private string FormatLaunchMessage(Models.Launch launch, int timezoneOffset, bool useRussian = true)
     {
         var stars = new string('⭐', launch.SpectacleRating);
         var country = GetCountryDisplay(launch.CountryCode);
@@ -317,7 +321,15 @@ public class BotHandlers
             }
         }
 
-        if (!string.IsNullOrEmpty(launch.Description))
+        // Show description based on language preference
+        var hasRussian = !string.IsNullOrEmpty(launch.DescriptionRu);
+        var hasEnglish = !string.IsNullOrEmpty(launch.Description);
+
+        if (useRussian && hasRussian)
+        {
+            message += $"\n\n{launch.DescriptionRu}\n\n_Переведено с помощью AI_";
+        }
+        else if (hasEnglish)
         {
             message += $"\n\n{launch.Description}";
         }
@@ -361,7 +373,7 @@ public class BotHandlers
         };
     }
 
-    private InlineKeyboardMarkup CreateSubscribeButton(string launchId, long userId)
+    private InlineKeyboardMarkup CreateSubscribeButton(string launchId, long userId, Models.Launch? launch = null, bool showingRussian = true)
     {
         var buttons = new List<InlineKeyboardButton[]>();
         var isSubscribed = _database.IsUserSubscribed(userId, launchId);
@@ -395,6 +407,25 @@ public class BotHandlers
             {
                 InlineKeyboardButton.WithCallbackData("🔔 Подписаться на уведомление", $"subscribe_{launchId}")
             });
+        }
+
+        // Add language toggle button if both translations exist
+        if (launch != null && !string.IsNullOrEmpty(launch.DescriptionRu) && !string.IsNullOrEmpty(launch.Description))
+        {
+            if (showingRussian)
+            {
+                buttons.Add(new[]
+                {
+                    InlineKeyboardButton.WithCallbackData("🇬🇧 Показать оригинал", $"lang_{launchId}_en")
+                });
+            }
+            else
+            {
+                buttons.Add(new[]
+                {
+                    InlineKeyboardButton.WithCallbackData("🇷🇺 Показать перевод", $"lang_{launchId}_ru")
+                });
+            }
         }
 
         if (IsAdmin(userId))
@@ -563,8 +594,8 @@ public class BotHandlers
             if (launch != null)
             {
                 var timezoneOffset = _database.GetUserTimezoneOffset(userId);
-                var message = FormatLaunchMessage(launch, timezoneOffset);
-                var keyboard = CreateSubscribeButton(launchId, userId);
+                var message = FormatLaunchMessage(launch, timezoneOffset, useRussian: true);
+                var keyboard = CreateSubscribeButton(launchId, userId, launch, showingRussian: true);
 
                 try
                 {
@@ -576,6 +607,42 @@ public class BotHandlers
         else
         {
             await _botClient.AnswerCallbackQuery(callbackQueryId, "❌ Ошибка", showAlert: true);
+        }
+    }
+
+    private async Task HandleLanguageToggle(long chatId, long userId, string data, int messageId, string callbackQueryId)
+    {
+        var parts = data.Split('_');
+        if (parts.Length != 3)
+        {
+            await _botClient.AnswerCallbackQuery(callbackQueryId, "❌ Ошибка");
+            return;
+        }
+
+        var launchId = parts[1];
+        var language = parts[2]; // "en" or "ru"
+        var useRussian = language == "ru";
+
+        var launch = await _launchService.GetLaunchByIdAsync(launchId);
+        if (launch == null)
+        {
+            await _botClient.AnswerCallbackQuery(callbackQueryId, "❌ Запуск не найден");
+            return;
+        }
+
+        var timezoneOffset = _database.GetUserTimezoneOffset(userId);
+        var message = FormatLaunchMessage(launch, timezoneOffset, useRussian);
+        var keyboard = CreateSubscribeButton(launchId, userId, launch, showingRussian: useRussian);
+
+        try
+        {
+            await _botClient.EditMessageText(chatId, messageId, message, replyMarkup: keyboard, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown);
+            await _botClient.AnswerCallbackQuery(callbackQueryId, useRussian ? "🇷🇺 Перевод" : "🇬🇧 Original");
+        }
+        catch (Exception ex)
+        {
+            await _botClient.AnswerCallbackQuery(callbackQueryId, "❌ Ошибка при обновлении");
+            Console.WriteLine($"Error toggling language: {ex.Message}");
         }
     }
 }

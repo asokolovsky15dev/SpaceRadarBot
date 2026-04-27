@@ -78,6 +78,12 @@ public class DatabaseService
                     launch.SpectacleRating = existingLaunch.SpectacleRating;
                     launch.ManualRatingOverride = true;
                 }
+
+                // Preserve Russian description if not being updated
+                if (string.IsNullOrWhiteSpace(launch.DescriptionRu) && !string.IsNullOrWhiteSpace(existingLaunch.DescriptionRu))
+                {
+                    launch.DescriptionRu = existingLaunch.DescriptionRu;
+                }
             }
 
             launches.Upsert(launch);
@@ -400,5 +406,19 @@ public class DatabaseService
         using var db = new LiteDatabase(_connectionString);
         var subscriptions = db.GetCollection<Subscription>("subscriptions");
         subscriptions.Delete(subscriptionId);
+    }
+
+    public List<Launch> GetLaunchesNeedingTranslation()
+    {
+        using var db = new LiteDatabase(_connectionString);
+        var launches = db.GetCollection<Launch>("launches");
+
+        var now = DateTime.UtcNow;
+        return launches
+            .Find(l => l.LaunchTime > now && 
+                       !string.IsNullOrWhiteSpace(l.Description) && 
+                       string.IsNullOrWhiteSpace(l.DescriptionRu))
+            .OrderBy(l => l.LaunchTime)
+            .ToList();
     }
 }

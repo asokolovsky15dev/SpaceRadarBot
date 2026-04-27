@@ -24,7 +24,21 @@ Console.WriteLine($"📂 Database: {dbPath}");
 var botClient = new TelegramBotClient(botToken);
 var database = new DatabaseService(dbPath);
 
-var launchSyncService = new LaunchSyncService(database);
+// Initialize translation service if API key is provided
+TranslationService? translationService = null;
+var openAiApiKey = configuration["OpenAI:ApiKey"];
+if (!string.IsNullOrWhiteSpace(openAiApiKey) && openAiApiKey != "your-openai-api-key-here")
+{
+    var openAiModel = configuration["OpenAI:Model"] ?? "gpt-3.5-turbo";
+    translationService = new TranslationService(openAiApiKey, openAiModel);
+    Console.WriteLine($"🌍 Translation service enabled (Model: {openAiModel})");
+}
+else
+{
+    Console.WriteLine("⚠️ Translation service disabled (no OpenAI API key configured)");
+}
+
+var launchSyncService = new LaunchSyncService(database, translationService);
 launchSyncService.Start();
 
 var launchService = new LaunchService(database);

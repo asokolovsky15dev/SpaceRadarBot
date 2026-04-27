@@ -8,13 +8,15 @@ public class LaunchSyncService
 {
     private readonly HttpClient _httpClient;
     private readonly DatabaseService _database;
+    private readonly TranslationService? _translationService;
     private Timer? _timer;
     private const string BaseUrl = "https://ll.thespacedevs.com/2.3.0/launches";
     private const int SyncIntervalMinutes = 10;
 
-    public LaunchSyncService(DatabaseService database)
+    public LaunchSyncService(DatabaseService database, TranslationService? translationService = null)
     {
         _database = database;
+        _translationService = translationService;
         _httpClient = new HttpClient();
         _httpClient.DefaultRequestHeaders.Add("User-Agent", "SpaceRadarBot/1.0");
     }
@@ -41,6 +43,12 @@ public class LaunchSyncService
 
             if (upcomingLaunches.Count > 0)
             {
+                // Translate descriptions to Russian if translation service is available
+                if (_translationService != null)
+                {
+                    await TranslateLaunchDescriptions(upcomingLaunches);
+                }
+
                 _database.UpsertLaunches(upcomingLaunches);
                 Console.WriteLine($"✅ [{DateTime.Now:HH:mm:ss}] Synced {upcomingLaunches.Count} upcoming launches to database");
             }
@@ -183,5 +191,47 @@ public class LaunchSyncService
         }
 
         return Math.Max(1, Math.Min(5, rating));
+    }
+
+    private async Task TranslateLaunchDescriptions(List<Launch> launches)
+    {
+        try
+        {
+            Console.WriteLine($"🌍 Starting translation of {launches.Count} launch descriptions...");
+            int translatedCount = 0;
+
+            foreach (var launch in launches)
+            {
+                if (!string.IsNullOrWhiteSpace(launch.Description))
+                {
+                    // Check if translation already exists in DB
+                    var existingLaunch = _database.GetLaunchById(launch.Id);
+                    if (existingLaunch?.DescriptionRu != null)
+                    {
+                        launch.DescriptionRu = existingLaunch.DescriptionRu;
+                        continue;
+                    }
+
+                    var translation = await _translationService!.TranslateToRussianAsync(launch.Description);
+                    if (translation != null)
+                    {
+                        launch.DescriptionRu = translation;
+                        translatedCount++;
+                        Console.WriteLine($"✅ Translated: {launch.Name}");
+                    }
+
+                    await Task.Delay(200); // Rate limiting to avoid API throttling
+                }
+            }
+
+            if (translatedCount > 0)
+            {
+                Console.WriteLine($"🌍 Successfully translated {translatedCount} descriptions to Russian");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️ Translation error: {ex.Message}");
+        }
     }
 }
