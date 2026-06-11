@@ -5,6 +5,9 @@ namespace SpaceRadarBot.Data;
 
 public class DatabaseService
 {
+    // Notify subscribers about a postponement only if the new launch time is within this window.
+    private const int PostponementNotificationWindowHours = 24;
+
     private readonly string _connectionString;
 
     public string ConnectionString => _connectionString;
@@ -61,6 +64,9 @@ public class DatabaseService
                         newUtc.AddMinutes(-30),
                         DateTimeKind.Utc);
 
+                    var hoursUntilLaunch = (newUtc - DateTime.UtcNow).TotalHours;
+                    var shouldNotifyAboutPostponement = hoursUntilLaunch <= PostponementNotificationWindowHours;
+
                     var affectedSubscriptions = subscriptions
                         .Find(s => s.LaunchId == launch.Id)
                         .ToList();
@@ -68,16 +74,19 @@ public class DatabaseService
                     var createdAt = DateTime.UtcNow;
                     foreach (var subscription in affectedSubscriptions)
                     {
-                        postponements.Insert(new PostponementNotification
+                        if (shouldNotifyAboutPostponement)
                         {
-                            UserId = subscription.UserId,
-                            LaunchId = launch.Id,
-                            LaunchName = launch.Name,
-                            OldLaunchTime = existingLaunch.LaunchTime,
-                            NewLaunchTime = launch.LaunchTime,
-                            CreatedAt = createdAt,
-                            Sent = false
-                        });
+                            postponements.Insert(new PostponementNotification
+                            {
+                                UserId = subscription.UserId,
+                                LaunchId = launch.Id,
+                                LaunchName = launch.Name,
+                                OldLaunchTime = existingLaunch.LaunchTime,
+                                NewLaunchTime = launch.LaunchTime,
+                                CreatedAt = createdAt,
+                                Sent = false
+                            });
+                        }
                         subscription.NotificationTime = newNotificationTime;
                         subscription.NotificationSent = false;
                         subscriptions.Update(subscription);
@@ -85,7 +94,10 @@ public class DatabaseService
 
                     if (affectedSubscriptions.Count > 0)
                     {
-                        Console.WriteLine($"🔔 Launch time changed for {launch.Name}. Rescheduled {affectedSubscriptions.Count} notification(s) to {newNotificationTime:HH:mm:ss} UTC");
+                        var notifiedSuffix = shouldNotifyAboutPostponement
+                            ? $", queued {affectedSubscriptions.Count} postponement notification(s)"
+                            : $" (launch is {hoursUntilLaunch:F1}h away, > {PostponementNotificationWindowHours}h threshold — no postponement notifications)";
+                        Console.WriteLine($"🔔 Launch time changed for {launch.Name}. Rescheduled {affectedSubscriptions.Count} notification(s) to {newNotificationTime:HH:mm:ss} UTC{notifiedSuffix}");
                     }
                 }
 
