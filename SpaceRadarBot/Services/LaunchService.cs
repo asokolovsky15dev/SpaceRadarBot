@@ -14,19 +14,13 @@ public class LaunchService
 
     public Task<List<Launch>> GetUpcomingLaunchesAsync()
     {
-        Console.WriteLine("📦 Reading upcoming launches from database");
-
         var launches = _database.GetUpcomingLaunches(5);
-
         return Task.FromResult(launches);
     }
 
     public Task<List<Launch>> GetAllUpcomingLaunchesAsync()
     {
-        Console.WriteLine("📦 Reading ALL upcoming launches from database for auto-subscriptions");
-
         var launches = _database.GetAllUpcomingLaunches();
-
         return Task.FromResult(launches);
     }
 

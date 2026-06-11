@@ -84,8 +84,14 @@ public class LaunchSyncService
             var now = DateTime.UtcNow;
             var launches = data.Results.Select(l =>
             {
-                // Extract first booster information (most launches have one core)
-                var firstBooster = l.Rocket?.LauncherStage?.FirstOrDefault();
+                // Extract all booster information (for rockets like Falcon Heavy with multiple cores)
+                var boosters = l.Rocket?.LauncherStage?.Select(stage => new BoosterInfo
+                {
+                    SerialNumber = stage.Launcher?.SerialNumber,
+                    FlightNumber = stage.LauncherFlightNumber,
+                    Reused = stage.Reused,
+                    LandingAttempt = stage.Landing?.Attempt
+                }).Where(b => !string.IsNullOrEmpty(b.SerialNumber)).ToList() ?? new List<BoosterInfo>();
 
                 return new Launch
                 {
@@ -99,10 +105,7 @@ public class LaunchSyncService
                     SpectacleRating = CalculateSpectacleRating(l),
                     Description = l.Mission?.Description,
                     Orbit = l.Mission?.Orbit?.Abbrev,
-                    BoosterSerialNumber = firstBooster?.Launcher?.SerialNumber,
-                    BoosterFlightNumber = firstBooster?.LauncherFlightNumber,
-                    BoosterReused = firstBooster?.Reused,
-                    LandingAttempt = firstBooster?.Landing?.Attempt,
+                    Boosters = boosters,
                     LastUpdated = now,
                     CachedAt = now
                 };
@@ -197,7 +200,6 @@ public class LaunchSyncService
     {
         try
         {
-            Console.WriteLine($"🌍 Starting translation of {launches.Count} launch descriptions...");
             int translatedCount = 0;
 
             foreach (var launch in launches)

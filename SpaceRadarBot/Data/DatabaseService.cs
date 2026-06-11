@@ -41,6 +41,7 @@ public class DatabaseService
         using var db = new LiteDatabase(_connectionString);
         var launches = db.GetCollection<Launch>("launches");
         var subscriptions = db.GetCollection<Subscription>("subscriptions");
+        var postponements = db.GetCollection<PostponementNotification>("postponementNotifications");
 
         foreach (var launch in launchList)
         {
@@ -48,21 +49,37 @@ public class DatabaseService
 
             if (existingLaunch != null)
             {
-                var timeDifference = Math.Abs((existingLaunch.LaunchTime - launch.LaunchTime).TotalMinutes);
+                var existingUtc = existingLaunch.LaunchTime.Kind == DateTimeKind.Utc
+                    ? existingLaunch.LaunchTime
+                    : existingLaunch.LaunchTime.ToUniversalTime();
+                var newUtc = launch.LaunchTime.ToUniversalTime();
+                var timeDifference = Math.Abs((existingUtc - newUtc).TotalMinutes);
 
                 if (timeDifference > 5)
                 {
                     var newNotificationTime = DateTime.SpecifyKind(
-                        launch.LaunchTime.ToUniversalTime().AddMinutes(-30), 
+                        newUtc.AddMinutes(-30),
                         DateTimeKind.Utc);
 
                     var affectedSubscriptions = subscriptions
-                        .Find(s => s.LaunchId == launch.Id && !s.NotificationSent)
+                        .Find(s => s.LaunchId == launch.Id)
                         .ToList();
 
+                    var createdAt = DateTime.UtcNow;
                     foreach (var subscription in affectedSubscriptions)
                     {
+                        postponements.Insert(new PostponementNotification
+                        {
+                            UserId = subscription.UserId,
+                            LaunchId = launch.Id,
+                            LaunchName = launch.Name,
+                            OldLaunchTime = existingLaunch.LaunchTime,
+                            NewLaunchTime = launch.LaunchTime,
+                            CreatedAt = createdAt,
+                            Sent = false
+                        });
                         subscription.NotificationTime = newNotificationTime;
+                        subscription.NotificationSent = false;
                         subscriptions.Update(subscription);
                     }
 
@@ -172,6 +189,33 @@ public class DatabaseService
             subscription.NotificationSent = true;
             subscriptions.Update(subscription);
         }
+    }
+
+    public List<PostponementNotification> GetPendingPostponementNotifications()
+    {
+        using var db = new LiteDatabase(_connectionString);
+        var postponements = db.GetCollection<PostponementNotification>("postponementNotifications");
+        return postponements.Find(p => !p.Sent).ToList();
+    }
+
+    public void MarkPostponementNotificationSent(int id)
+    {
+        using var db = new LiteDatabase(_connectionString);
+        var postponements = db.GetCollection<PostponementNotification>("postponementNotifications");
+
+        var notification = postponements.FindById(id);
+        if (notification != null)
+        {
+            notification.Sent = true;
+            postponements.Update(notification);
+        }
+    }
+
+    public int ClearPendingPostponementNotifications()
+    {
+        using var db = new LiteDatabase(_connectionString);
+        var postponements = db.GetCollection<PostponementNotification>("postponementNotifications");
+        return postponements.DeleteMany(p => !p.Sent);
     }
 
     public bool IsUserSubscribed(long userId, string launchId)

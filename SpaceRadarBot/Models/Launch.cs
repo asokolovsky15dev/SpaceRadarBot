@@ -18,12 +18,17 @@ public class Launch
     public string? DescriptionRu { get; set; }
     public string? Orbit { get; set; }
 
-    // Booster information
-    public string? BoosterSerialNumber { get; set; }
-    public int? BoosterFlightNumber { get; set; }
-    public bool? BoosterReused { get; set; }
-    public bool? LandingAttempt { get; set; }
+    // Booster information (supports multiple boosters like Falcon Heavy)
+    public List<BoosterInfo> Boosters { get; set; } = new();
 
     public DateTime LastUpdated { get; set; }
     public DateTime CachedAt { get; set; }
+}
+
+public class BoosterInfo
+{
+    public string? SerialNumber { get; set; }
+    public int? FlightNumber { get; set; }
+    public bool? Reused { get; set; }
+    public bool? LandingAttempt { get; set; }
 }

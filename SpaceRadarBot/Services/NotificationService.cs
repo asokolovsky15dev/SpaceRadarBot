@@ -35,12 +35,46 @@ public class NotificationService
     {
         try
         {
+            await ProcessPostponementNotifications();
             await ProcessManualSubscriptions();
             await ProcessAutomaticSubscriptions();
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error in notification service: {ex.Message}");
+            Console.WriteLine($"❌ Notification service tick failed: {ex}");
+        }
+    }
+
+    private async Task ProcessPostponementNotifications()
+    {
+        try
+        {
+            var pendingPostponements = _database.GetPendingPostponementNotifications();
+
+            foreach (var postponement in pendingPostponements)
+            {
+                var timezoneOffset = _database.GetUserTimezoneOffset(postponement.UserId);
+                var message = FormatPostponementMessage(
+                    postponement.LaunchName,
+                    postponement.OldLaunchTime,
+                    postponement.NewLaunchTime,
+                    timezoneOffset);
+
+                try
+                {
+                    await _botClient.SendMessage(postponement.UserId, message, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown, disableNotification: false);
+                    _database.MarkPostponementNotificationSent(postponement.Id);
+                    Console.WriteLine($"📣 Postponement notification sent to user {postponement.UserId} for launch {postponement.LaunchName}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"❌ Failed to send postponement to user {postponement.UserId} (launch {postponement.LaunchName}): {ex.Message}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"❌ ProcessPostponementNotifications failed: {ex}");
         }
     }
 
@@ -67,7 +101,7 @@ public class NotificationService
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"Failed to send notification to user {subscription.UserId}: {ex.Message}");
+                        Console.WriteLine($"❌ Failed to send notification to user {subscription.UserId} (launch {launch.Name}): {ex.Message}");
                     }
                 }
                 else
@@ -79,7 +113,7 @@ public class NotificationService
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error processing manual subscriptions: {ex.Message}");
+            Console.WriteLine($"❌ ProcessManualSubscriptions failed: {ex}");
         }
     }
 
@@ -98,7 +132,7 @@ public class NotificationService
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error processing automatic subscriptions: {ex.Message}");
+            Console.WriteLine($"❌ ProcessAutomaticSubscriptions failed: {ex}");
         }
     }
 
@@ -135,7 +169,7 @@ public class NotificationService
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error creating automatic subscriptions for user {userId}: {ex.Message}");
+            Console.WriteLine($"❌ CreateAutomaticSubscriptionsForUser failed for user {userId}: {ex}");
         }
     }
 
@@ -176,7 +210,7 @@ public class NotificationService
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error cleaning up automatic subscriptions for user {userId}: {ex.Message}");
+            Console.WriteLine($"❌ CleanupIncompatibleAutomaticSubscriptions failed for user {userId}: {ex}");
         }
     }
 
@@ -187,35 +221,41 @@ public class NotificationService
         var formattedTime = LaunchService.FormatLaunchTime(launch.LaunchTime, timezoneOffset);
 
         var message = $"🚀 *ЗАПУСК ЧЕРЕЗ 30 МИНУТ!*\n\n" +
-                     $"*{launch.Name}*\n\n" +
+                     $"*{SanitizeMd(launch.Name)}*\n\n" +
                      $"📍 {country}\n" +
                      $"🕐 {formattedTime}\n" +
                      $"✨ {stars}";
 
-        // Add booster information if available
-        if (!string.IsNullOrEmpty(launch.BoosterSerialNumber))
+        // Add booster information if available (handles multiple boosters like Falcon Heavy)
+        if (launch.Boosters != null && launch.Boosters.Count > 0)
         {
-            var flightInfo = "";
-            if (launch.BoosterFlightNumber.HasValue)
+            foreach (var booster in launch.Boosters)
             {
-                var flightNum = launch.BoosterFlightNumber.Value;
-                var flightOrdinal = FormatFlightNumber(flightNum);
-                flightInfo = $" ({flightOrdinal} полёт)";
-            }
+                if (!string.IsNullOrEmpty(booster.SerialNumber))
+                {
+                    var flightInfo = "";
+                    if (booster.FlightNumber.HasValue)
+                    {
+                        var flightNum = booster.FlightNumber.Value;
+                        var flightOrdinal = FormatFlightNumber(flightNum);
+                        flightInfo = $" ({flightOrdinal} полёт)";
+                    }
 
-            var reusedIcon = launch.BoosterReused == true ? "♻️" : "🆕";
-            message += $"\n{reusedIcon} Бустер {launch.BoosterSerialNumber}{flightInfo}";
+                    var reusedIcon = booster.Reused == true ? "♻️" : "🆕";
+                    message += $"\n{reusedIcon} Бустер {SanitizeMd(booster.SerialNumber)}{flightInfo}";
 
-            if (launch.LandingAttempt == true)
-            {
-                message += "\n🎯 Посадка: ожидается";
+                    if (booster.LandingAttempt == true)
+                    {
+                        message += " 🎯";
+                    }
+                }
             }
         }
 
         // Show Russian description if available, otherwise fall back to English
-        var description = !string.IsNullOrEmpty(launch.DescriptionRu) 
-            ? $"{launch.DescriptionRu}\n\n_Переведено с помощью AI_" 
-            : launch.Description;
+        var description = !string.IsNullOrEmpty(launch.DescriptionRu)
+            ? $"{SanitizeMd(launch.DescriptionRu)}\n\n_Переведено с помощью AI_"
+            : (!string.IsNullOrEmpty(launch.Description) ? SanitizeMd(launch.Description) : null);
         if (!string.IsNullOrEmpty(description))
         {
             message += $"\n\n{description}";
@@ -227,6 +267,31 @@ public class NotificationService
         }
 
         return message;
+    }
+
+    private string FormatPostponementMessage(string launchName, DateTime oldTime, DateTime newTime, int timezoneOffset)
+    {
+        var oldLocalTime = oldTime.AddHours(timezoneOffset);
+        var newLocalTime = newTime.AddHours(timezoneOffset);
+        var newNotificationTime = newTime.AddMinutes(-30).AddHours(timezoneOffset);
+
+        var timezoneDisplay = timezoneOffset >= 0 ? $"+{timezoneOffset}" : $"{timezoneOffset}";
+
+        var message = $"⏰ *ПЕРЕНОС!*\n\n" +
+                     $"🚀 *{SanitizeMd(launchName)}*\n\n" +
+                     $"Старое время: {oldLocalTime:dd.MM.yyyy HH:mm} (UTC{timezoneDisplay})\n" +
+                     $"Новое время: {newLocalTime:dd.MM.yyyy HH:mm} (UTC{timezoneDisplay})\n\n" +
+                     $"Ваше уведомление перенесено на {newNotificationTime:dd.MM.yyyy HH:mm} (UTC{timezoneDisplay})";
+
+        return message;
+    }
+
+    // Legacy Markdown does not support backslash escape, so we strip the four special chars
+    // (_, *, [, `) from user-supplied content to keep Telegram's parser happy.
+    private static string SanitizeMd(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return s;
+        return s.Replace("_", " ").Replace("*", "").Replace("[", "(").Replace("`", "'");
     }
 
     private string FormatFlightNumber(int number)

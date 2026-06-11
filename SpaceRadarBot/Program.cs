@@ -1,10 +1,15 @@
-﻿using Microsoft.Extensions.Configuration;
+﻿using LiteDB;
+using Microsoft.Extensions.Configuration;
 using SpaceRadarBot.Data;
 using SpaceRadarBot.Handlers;
 using SpaceRadarBot.Services;
 using Telegram.Bot;
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
+
+BsonMapper.Global.RegisterType<DateTime>(
+    serialize: dt => dt.ToUniversalTime(),
+    deserialize: bson => DateTime.SpecifyKind(bson.AsDateTime, DateTimeKind.Utc));
 
 var configuration = new ConfigurationBuilder()
     .SetBasePath(Directory.GetCurrentDirectory())
@@ -23,6 +28,12 @@ Console.WriteLine($"📂 Database: {dbPath}");
 
 var botClient = new TelegramBotClient(botToken);
 var database = new DatabaseService(dbPath);
+
+var clearedPostponements = database.ClearPendingPostponementNotifications();
+if (clearedPostponements > 0)
+{
+    Console.WriteLine($"🧹 Cleared {clearedPostponements} stale pending postponement notification(s)");
+}
 
 // Initialize translation service if API key is provided
 TranslationService? translationService = null;
@@ -59,7 +70,7 @@ botClient.StartReceiving(
     async (bot, update, ct) => await botHandlers.HandleUpdateAsync(update),
     (bot, ex, ct) =>
     {
-        Console.WriteLine($"❌ Polling error: {ex.Message}");
+        Console.WriteLine($"❌ Polling error: {ex}");
         return Task.CompletedTask;
     },
     receiverOptions

@@ -45,7 +45,10 @@ public class BotHandlers
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error handling update: {ex.Message}");
+            var userId = update.Message?.From?.Id ?? update.CallbackQuery?.From?.Id;
+            var kind = update.Message?.Text != null ? $"message \"{update.Message.Text}\"" :
+                       update.CallbackQuery != null ? $"callback \"{update.CallbackQuery.Data}\"" : "unknown";
+            Console.WriteLine($"❌ Update #{update.Id} from user {userId} ({kind}) failed: {ex}");
         }
     }
 
@@ -296,28 +299,34 @@ public class BotHandlers
         var country = GetCountryDisplay(launch.CountryCode);
         var formattedTime = LaunchService.FormatLaunchTime(launch.LaunchTime, timezoneOffset);
 
-        var message = $"🚀 *{launch.Name}*\n\n" +
+        var message = $"🚀 *{SanitizeMd(launch.Name)}*\n\n" +
                      $"📍 {country}\n" +
                      $"🕐 {formattedTime}\n" +
                      $"✨ {stars}";
 
-        // Add booster information if available
-        if (!string.IsNullOrEmpty(launch.BoosterSerialNumber))
+        // Add booster information if available (handles multiple boosters like Falcon Heavy)
+        if (launch.Boosters != null && launch.Boosters.Count > 0)
         {
-            var flightInfo = "";
-            if (launch.BoosterFlightNumber.HasValue)
+            foreach (var booster in launch.Boosters)
             {
-                var flightNum = launch.BoosterFlightNumber.Value;
-                var flightOrdinal = FormatFlightNumber(flightNum);
-                flightInfo = $" ({flightOrdinal} полёт)";
-            }
+                if (!string.IsNullOrEmpty(booster.SerialNumber))
+                {
+                    var flightInfo = "";
+                    if (booster.FlightNumber.HasValue)
+                    {
+                        var flightNum = booster.FlightNumber.Value;
+                        var flightOrdinal = FormatFlightNumber(flightNum);
+                        flightInfo = $" ({flightOrdinal} полёт)";
+                    }
 
-            var reusedIcon = launch.BoosterReused == true ? "♻️" : "🆕";
-            message += $"\n{reusedIcon} Бустер {launch.BoosterSerialNumber}{flightInfo}";
+                    var reusedIcon = booster.Reused == true ? "♻️" : "🆕";
+                    message += $"\n{reusedIcon} Бустер {SanitizeMd(booster.SerialNumber)}{flightInfo}";
 
-            if (launch.LandingAttempt == true)
-            {
-                message += "\n🎯 Посадка: ожидается";
+                    if (booster.LandingAttempt == true)
+                    {
+                        message += " 🎯";
+                    }
+                }
             }
         }
 
@@ -327,14 +336,22 @@ public class BotHandlers
 
         if (useRussian && hasRussian)
         {
-            message += $"\n\n{launch.DescriptionRu}\n\n_Переведено с помощью AI_";
+            message += $"\n\n{SanitizeMd(launch.DescriptionRu!)}\n\n_Переведено с помощью AI_";
         }
         else if (hasEnglish)
         {
-            message += $"\n\n{launch.Description}";
+            message += $"\n\n{SanitizeMd(launch.Description!)}";
         }
 
         return message;
+    }
+
+    // Legacy Markdown does not support backslash escape, so we strip the four special chars
+    // (_, *, [, `) from user-supplied content to keep Telegram's parser happy.
+    private static string SanitizeMd(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return s;
+        return s.Replace("_", " ").Replace("*", "").Replace("[", "(").Replace("`", "'");
     }
 
     private string FormatFlightNumber(int number)
@@ -642,7 +659,7 @@ public class BotHandlers
         catch (Exception ex)
         {
             await _botClient.AnswerCallbackQuery(callbackQueryId, "❌ Ошибка при обновлении");
-            Console.WriteLine($"Error toggling language: {ex.Message}");
+            Console.WriteLine($"❌ Language toggle failed for user {userId}: {ex}");
         }
     }
 }
