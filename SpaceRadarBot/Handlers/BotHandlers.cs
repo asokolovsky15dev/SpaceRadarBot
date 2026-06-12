@@ -32,6 +32,12 @@ public class BotHandlers
 
     public async Task HandleUpdateAsync(Update update)
     {
+        var userId = update.Message?.From?.Id ?? update.CallbackQuery?.From?.Id;
+        if (userId.HasValue)
+        {
+            _database.UpdateLastInteractionAt(userId.Value);
+        }
+
         try
         {
             if (update.Message?.Text != null)
@@ -45,7 +51,6 @@ public class BotHandlers
         }
         catch (Exception ex)
         {
-            var userId = update.Message?.From?.Id ?? update.CallbackQuery?.From?.Id;
             var kind = update.Message?.Text != null ? $"message \"{update.Message.Text}\"" :
                        update.CallbackQuery != null ? $"callback \"{update.CallbackQuery.Data}\"" : "unknown";
             Console.WriteLine($"❌ Update #{update.Id} from user {userId} ({kind}) failed: {ex}");

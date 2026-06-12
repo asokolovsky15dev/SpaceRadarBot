@@ -405,6 +405,32 @@ public class DatabaseService
         }
     }
 
+    public void UpdateLastInteractionAt(long userId)
+    {
+        using var db = new LiteDatabase(_connectionString);
+        var userPreferences = db.GetCollection<UserPreference>("userPreferences");
+        var now = DateTime.UtcNow;
+
+        var existing = userPreferences.FindOne(u => u.UserId == userId);
+        if (existing != null)
+        {
+            existing.LastInteractionAt = now;
+            userPreferences.Update(existing);
+        }
+        else
+        {
+            userPreferences.Insert(new UserPreference
+            {
+                UserId = userId,
+                Preference = NotificationPreference.None,
+                TimezoneOffset = 0,
+                CreatedAt = now,
+                UpdatedAt = now,
+                LastInteractionAt = now
+            });
+        }
+    }
+
     public List<long> GetUsersWithActivePreferences()
     {
         using var db = new LiteDatabase(_connectionString);

@@ -8,6 +8,7 @@ public class UserPreference
     public int TimezoneOffset { get; set; } = 0; // Hours offset from UTC (e.g., +3, -5)
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
+    public DateTime? LastInteractionAt { get; set; }
 }
 
 public enum NotificationPreference
