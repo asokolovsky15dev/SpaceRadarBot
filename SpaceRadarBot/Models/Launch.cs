@@ -22,7 +22,6 @@ public class Launch
     public List<BoosterInfo> Boosters { get; set; } = new();
 
     public DateTime LastUpdated { get; set; }
-    public DateTime CachedAt { get; set; }
 }
 
 public class BoosterInfo

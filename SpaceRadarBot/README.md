@@ -88,55 +88,47 @@ SpaceRadarBot/
 
 ## Deployment to VPS
 
-### Deploy to DigitalOcean/Linux VPS
+The production instance runs on a DigitalOcean droplet as a **framework-dependent** app in `/root/bot/`
+under the systemd unit **`telegrambot.service`** (requires the .NET runtime installed at `/root/.dotnet`).
 
-1. **Publish the application:**
+1. **Publish the application (framework-dependent):**
    ```bash
-   dotnet publish -c Release -r linux-x64 --self-contained -o ./publish
+   dotnet publish SpaceRadarBot/SpaceRadarBot.csproj -c Release -o ./publish
    ```
 
 2. **Upload to VPS:**
    ```bash
-   scp -r ./publish/* root@your-vps-ip:/opt/spaceradar/
+   scp -r ./publish/* root@your-vps-ip:/root/bot/
    ```
 
-3. **Set environment variable on VPS:**
-   ```bash
-   ssh root@your-vps-ip
-
-   # Create systemd service file
-   sudo nano /etc/systemd/system/spaceradar.service
-   ```
-
-4. **Add this configuration:**
+3. **Systemd unit** (`/etc/systemd/system/telegrambot.service`):
    ```ini
    [Unit]
-   Description=Space Radar Telegram Bot
+   Description=Telegram Bot MVP
    After=network.target
 
    [Service]
-   Type=simple
-   User=root
-   WorkingDirectory=/opt/spaceradar
-   ExecStart=/opt/spaceradar/SpaceRadarBot
+   WorkingDirectory=/root/bot
+   ExecStart=/root/.dotnet/dotnet /root/bot/SpaceRadarBot.dll
    Restart=always
    RestartSec=10
-   Environment="BOT_TOKEN=your_bot_token_here"
-   Environment="DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1"
+   User=root
 
    [Install]
    WantedBy=multi-user.target
    ```
 
-5. **Start the service:**
-   ```bash
-   chmod +x /opt/spaceradar/SpaceRadarBot
-   sudo systemctl enable spaceradar
-   sudo systemctl start spaceradar
-   sudo systemctl status spaceradar
+   > Note: do **not** set `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` — the bot formats dates
+   > with the `ru-RU` culture and would fall back to English month names without ICU.
 
-   # View logs
-   sudo journalctl -u spaceradar -f
+4. **Configuration** lives in `/root/bot/appsettings.json` (bot token, OpenAI key, admin IDs).
+   It is gitignored; use `appsettings.example.json` as a template.
+
+5. **Restart & logs:**
+   ```bash
+   sudo systemctl restart telegrambot
+   sudo systemctl status telegrambot
+   sudo journalctl -u telegrambot -f
    ```
 
 ## Security

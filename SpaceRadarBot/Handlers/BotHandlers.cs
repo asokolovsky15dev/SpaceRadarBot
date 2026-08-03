@@ -3,6 +3,7 @@ using SpaceRadarBot.Models;
 using SpaceRadarBot.Services;
 using Telegram.Bot;
 using Telegram.Bot.Types;
+using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.ReplyMarkups;
 using Microsoft.Extensions.Configuration;
 
@@ -15,31 +16,40 @@ public class BotHandlers
     private readonly DatabaseService _database;
     private readonly NotificationService _notificationService;
     private readonly List<long> _adminUserIds;
+    private readonly string _botUsername;
+
+    // Пользователи, от которых ждём текст фидбэка следующим сообщением (/feedback без текста).
+    // In-memory: при рестарте бота режим сбросится — пользователь просто повторит команду.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, byte> _awaitingFeedback = new();
 
     public BotHandlers(
         ITelegramBotClient botClient,
         LaunchService launchService,
         DatabaseService database,
         NotificationService notificationService,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        string botUsername)
     {
         _botClient = botClient;
         _launchService = launchService;
         _database = database;
         _notificationService = notificationService;
         _adminUserIds = configuration.GetSection("AdminUserIds").Get<List<long>>() ?? new List<long>();
+        _botUsername = botUsername;
     }
 
     public async Task HandleUpdateAsync(Update update)
     {
-        var userId = update.Message?.From?.Id ?? update.CallbackQuery?.From?.Id;
-        if (userId.HasValue)
-        {
-            _database.UpdateLastInteractionAt(userId.Value);
-        }
+        var userId = update.Message?.From?.Id ?? update.CallbackQuery?.From.Id;
 
         try
         {
+            // Внутри try: сбой БД здесь не должен ронять обработку апдейта
+            if (userId.HasValue)
+            {
+                _database.UpdateLastInteractionAt(userId.Value);
+            }
+
             if (update.Message?.Text != null)
             {
                 await HandleMessageAsync(update.Message);
@@ -59,33 +69,138 @@ public class BotHandlers
 
     private async Task HandleMessageAsync(Message message)
     {
+        // Бот рассчитан на личные чаты: подписки и уведомления привязаны к user id,
+        // а в группах уведомление всё равно ушло бы в личку, которой может не быть.
+        if (message.Chat.Type != ChatType.Private || message.From == null)
+            return;
+
         var chatId = message.Chat.Id;
+        var userId = message.From.Id;
         var text = message.Text ?? "";
 
-        if (text.StartsWith("/start"))
+        if (!text.StartsWith('/'))
         {
-            await HandleStartCommand(chatId);
+            // Пользователь в режиме ожидания фидбэка — это сообщение и есть фидбэк
+            if (_awaitingFeedback.ContainsKey(userId))
+            {
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    await _botClient.SendMessage(chatId,
+                        "Пожалуйста, отправьте фидбэк текстовым сообщением.",
+                        disableNotification: false);
+                    return;
+                }
+
+                _awaitingFeedback.TryRemove(userId, out _);
+                await SubmitFeedbackAsync(chatId, message.From, text);
+            }
+            return;
         }
-        else if (text.StartsWith("/next"))
+
+        // Любая команда отменяет режим ожидания фидбэка,
+        // чтобы «/feedback → передумал → /next» не записал «/next»-намерение как отзыв.
+        _awaitingFeedback.TryRemove(userId, out _);
+
+        // Точное сопоставление команды: раньше StartsWith("/next") ловил и "/nextfoo".
+        // Суффикс @botname поддерживаем, чужие @боты игнорируем.
+        var command = text.Split(' ', 2)[0];
+        var atIndex = command.IndexOf('@');
+        if (atIndex >= 0)
         {
-            await HandleNextCommand(chatId, message.From?.Id ?? 0);
+            if (!command[(atIndex + 1)..].Equals(_botUsername, StringComparison.OrdinalIgnoreCase))
+                return;
+            command = command[..atIndex];
         }
-        else if (text.StartsWith("/settings"))
+
+        switch (command)
         {
-            await HandleSettingsCommand(chatId, message.From?.Id ?? 0);
+            case "/start":
+                await HandleStartCommand(chatId);
+                break;
+            case "/next":
+                await HandleNextCommand(chatId, userId);
+                break;
+            case "/settings":
+                await HandleSettingsCommand(chatId, userId);
+                break;
+            case "/timezone":
+                await HandleTimezoneCommand(chatId, userId, text);
+                break;
+            case "/count":
+                await HandleCountCommand(chatId, userId);
+                break;
+            case "/setrating":
+                await HandleSetRatingCommand(chatId, userId, text);
+                break;
+            case "/feedback":
+                await HandleFeedbackCommand(chatId, message, text);
+                break;
         }
-        else if (text.StartsWith("/timezone"))
+    }
+
+    // Не больше стольких фидбэков в час с одного пользователя — защита от случайного флуда.
+    private const int MaxFeedbackPerHour = 5;
+
+    private async Task HandleFeedbackCommand(long chatId, Message message, string text)
+    {
+        var parts = text.Split(' ', 2);
+        var feedbackText = parts.Length > 1 ? parts[1].Trim() : "";
+
+        if (string.IsNullOrWhiteSpace(feedbackText))
         {
-            await HandleTimezoneCommand(chatId, message.From?.Id ?? 0, text);
+            // Тап по команде в меню шлёт голый /feedback — ждём текст следующим сообщением
+            _awaitingFeedback[message.From!.Id] = 0;
+            await _botClient.SendMessage(chatId,
+                "💬 Напишите ваш отзыв или идею следующим сообщением 👇\n\n" +
+                "Оно попадёт напрямую разработчику. Любая команда отменит отправку.",
+                disableNotification: false);
+            return;
         }
-        else if (text.StartsWith("/count"))
+
+        await SubmitFeedbackAsync(chatId, message.From!, feedbackText);
+    }
+
+    private async Task SubmitFeedbackAsync(long chatId, User from, string feedbackText)
+    {
+        var userId = from.Id;
+
+        if (_database.CountRecentFeedback(userId, TimeSpan.FromHours(1)) >= MaxFeedbackPerHour)
         {
-            await HandleCountCommand(chatId, message.From?.Id ?? 0);
+            await _botClient.SendMessage(chatId,
+                "⏳ Слишком много сообщений подряд. Попробуйте снова через час.",
+                disableNotification: false);
+            return;
         }
-        else if (text.StartsWith("/setrating"))
+
+        feedbackText = MessageFormatter.TruncateFeedback(feedbackText);
+        _database.SaveFeedback(new Feedback
         {
-            await HandleSetRatingCommand(chatId, message.From?.Id ?? 0, text);
+            UserId = userId,
+            Username = from.Username,
+            Text = feedbackText,
+            CreatedAt = DateTime.UtcNow
+        });
+
+        var adminMessage = MessageFormatter.FormatFeedbackAdminMessage(userId, from.Username, feedbackText);
+        foreach (var adminId in _adminUserIds)
+        {
+            if (adminId == userId)
+                continue; // админ шлёт фидбэк сам себе — подтверждения достаточно
+
+            try
+            {
+                await _botClient.SendMessage(adminId, adminMessage, parseMode: ParseMode.Markdown, disableNotification: false);
+            }
+            catch (Exception ex)
+            {
+                // 403 (админ не начинал чат с ботом) не должен ронять команду — фидбэк уже в базе
+                Console.WriteLine($"❌ Failed to forward feedback to admin {adminId}: {ex.Message}");
+            }
         }
+
+        await _botClient.SendMessage(chatId,
+            "✅ Спасибо! Ваше сообщение передано разработчику.",
+            disableNotification: false);
     }
 
     private async Task HandleStartCommand(long chatId)
@@ -95,7 +210,9 @@ public class BotHandlers
                            "Команды:\n" +
                            "/next - Показать 5 предстоящих запусков\n" +
                            "/settings - Настроить автоматические уведомления\n" +
-                           "/timezone - Установить часовой пояс (например: /timezone +3)\n\n" +
+                           "/timezone - Установить часовой пояс (например: /timezone +3)\n" +
+                           "/count - Статистика ваших подписок\n" +
+                           "/feedback - Отправить отзыв или идею разработчику\n\n" +
                            "Вы можете подписаться на уведомления о запуске, нажав кнопку под каждым запуском. " +
                            "Вы получите уведомление за 30 минут до старта!";
 
@@ -116,10 +233,10 @@ public class BotHandlers
 
         foreach (var launch in launches)
         {
-            var message = FormatLaunchMessage(launch, timezoneOffset, useRussian: true);
+            var message = MessageFormatter.FormatLaunchMessage(launch, timezoneOffset, useRussian: true);
             var keyboard = CreateSubscribeButton(launch.Id, userId, launch);
 
-            await _botClient.SendMessage(chatId, message, replyMarkup: keyboard, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown, disableNotification: false);
+            await _botClient.SendMessage(chatId, message, replyMarkup: keyboard, parseMode: ParseMode.Markdown, disableNotification: false);
             await Task.Delay(50);
         }
     }
@@ -158,9 +275,8 @@ public class BotHandlers
         if (parts.Length < 2)
         {
             var currentOffset = _database.GetUserTimezoneOffset(userId);
-            var offsetDisplay = currentOffset >= 0 ? $"+{currentOffset}" : $"{currentOffset}";
             var message = "🌍 Установка часового пояса\n\n" +
-                         $"Текущий часовой пояс: UTC{offsetDisplay}\n\n" +
+                         $"Текущий часовой пояс: UTC{MessageFormatter.FormatOffset(currentOffset)}\n\n" +
                          "Для изменения используйте:\n" +
                          "/timezone +3\n" +
                          "/timezone -5\n" +
@@ -183,8 +299,7 @@ public class BotHandlers
 
             _database.SetUserTimezoneOffset(userId, timezoneOffset);
 
-            var offsetDisplay = timezoneOffset >= 0 ? $"+{timezoneOffset}" : $"{timezoneOffset}";
-            var message = $"✅ Часовой пояс установлен: UTC{offsetDisplay}\n\n" +
+            var message = $"✅ Часовой пояс установлен: UTC{MessageFormatter.FormatOffset(timezoneOffset)}\n\n" +
                          "Теперь все время будет отображаться в вашем часовом поясе!";
 
             await _botClient.SendMessage(chatId, message, disableNotification: false);
@@ -257,17 +372,11 @@ public class BotHandlers
 
         var timezoneOffset = _database.GetUserTimezoneOffset(userId);
         var localNotificationTime = notificationTime.AddHours(timezoneOffset);
-        var timezoneDisplay = timezoneOffset >= 0 ? $"+{timezoneOffset}" : $"{timezoneOffset}";
 
-        await _botClient.AnswerCallbackQuery(callbackQueryId, $"✅ Подписка оформлена! Уведомление: {localNotificationTime:dd.MM HH:mm} (UTC{timezoneDisplay})");
+        await _botClient.AnswerCallbackQuery(callbackQueryId, $"✅ Подписка оформлена! Уведомление: {localNotificationTime:dd.MM HH:mm} (UTC{MessageFormatter.FormatOffset(timezoneOffset)})");
 
-        var updatedLaunch = await _launchService.GetLaunchByIdAsync(launchId);
-        var updatedKeyboard = CreateSubscribeButton(launchId, userId, updatedLaunch, showingRussian: true);
-        try
-        {
-            await _botClient.EditMessageReplyMarkup(chatId, messageId, replyMarkup: updatedKeyboard);
-        }
-        catch { }
+        var updatedKeyboard = CreateSubscribeButton(launchId, userId, launch, showingRussian: true);
+        await TryEditReplyMarkup(chatId, messageId, updatedKeyboard);
     }
 
     private async Task HandleUnsubscribe(long chatId, long userId, string launchId, int messageId, string callbackQueryId)
@@ -284,115 +393,14 @@ public class BotHandlers
         {
             await _botClient.AnswerCallbackQuery(callbackQueryId, "✅ Подписка отменена");
 
-            var updatedLaunch = await _launchService.GetLaunchByIdAsync(launchId);
-            var updatedKeyboard = CreateSubscribeButton(launchId, userId, updatedLaunch, showingRussian: true);
-            try
-            {
-                await _botClient.EditMessageReplyMarkup(chatId, messageId, replyMarkup: updatedKeyboard);
-            }
-            catch { }
+            var launch = await _launchService.GetLaunchByIdAsync(launchId);
+            var updatedKeyboard = CreateSubscribeButton(launchId, userId, launch, showingRussian: true);
+            await TryEditReplyMarkup(chatId, messageId, updatedKeyboard);
         }
         else
         {
             await _botClient.AnswerCallbackQuery(callbackQueryId, "❌ Ошибка при отмене подписки.", showAlert: true);
         }
-    }
-
-    private string FormatLaunchMessage(Models.Launch launch, int timezoneOffset, bool useRussian = true)
-    {
-        var stars = new string('⭐', launch.SpectacleRating);
-        var country = GetCountryDisplay(launch.CountryCode);
-        var formattedTime = LaunchService.FormatLaunchTime(launch.LaunchTime, timezoneOffset);
-
-        var message = $"🚀 *{SanitizeMd(launch.Name)}*\n\n" +
-                     $"📍 {country}\n" +
-                     $"🕐 {formattedTime}\n" +
-                     $"✨ {stars}";
-
-        // Add booster information if available (handles multiple boosters like Falcon Heavy)
-        if (launch.Boosters != null && launch.Boosters.Count > 0)
-        {
-            foreach (var booster in launch.Boosters)
-            {
-                if (!string.IsNullOrEmpty(booster.SerialNumber))
-                {
-                    var flightInfo = "";
-                    if (booster.FlightNumber.HasValue)
-                    {
-                        var flightNum = booster.FlightNumber.Value;
-                        var flightOrdinal = FormatFlightNumber(flightNum);
-                        flightInfo = $" ({flightOrdinal} полёт)";
-                    }
-
-                    var reusedIcon = booster.Reused == true ? "♻️" : "🆕";
-                    message += $"\n{reusedIcon} Бустер {SanitizeMd(booster.SerialNumber)}{flightInfo}";
-
-                    if (booster.LandingAttempt == true)
-                    {
-                        message += " 🎯";
-                    }
-                }
-            }
-        }
-
-        // Show description based on language preference
-        var hasRussian = !string.IsNullOrEmpty(launch.DescriptionRu);
-        var hasEnglish = !string.IsNullOrEmpty(launch.Description);
-
-        if (useRussian && hasRussian)
-        {
-            message += $"\n\n{SanitizeMd(launch.DescriptionRu!)}\n\n_Переведено с помощью AI_";
-        }
-        else if (hasEnglish)
-        {
-            message += $"\n\n{SanitizeMd(launch.Description!)}";
-        }
-
-        return message;
-    }
-
-    // Legacy Markdown does not support backslash escape, so we strip the four special chars
-    // (_, *, [, `) from user-supplied content to keep Telegram's parser happy.
-    private static string SanitizeMd(string s)
-    {
-        if (string.IsNullOrEmpty(s)) return s;
-        return s.Replace("_", " ").Replace("*", "").Replace("[", "(").Replace("`", "'");
-    }
-
-    private string FormatFlightNumber(int number)
-    {
-        return number switch
-        {
-            1 => "1-й",
-            2 => "2-й",
-            3 => "3-й",
-            _ => $"{number}-й"
-        };
-    }
-
-    private string GetCountryDisplay(string? countryCode)
-    {
-        if (string.IsNullOrEmpty(countryCode))
-            return "🌍 Unknown";
-
-        return countryCode.ToUpper() switch
-        {
-            "US" => "🇺🇸 USA",
-            "RU" => "🇷🇺 Russia",
-            "CN" => "🇨🇳 China",
-            "GF" => "🇪🇺 French Guiana",
-            "IN" => "🇮🇳 India",
-            "JP" => "🇯🇵 Japan",
-            "NZ" => "🇳🇿 New Zealand",
-            "KZ" => "🇰🇿 Kazakhstan",
-            "FR" => "🇫🇷 France",
-            "GB" => "🇬🇧 United Kingdom",
-            "IT" => "🇮🇹 Italy",
-            "IR" => "🇮🇷 Iran",
-            "KR" => "🇰🇷 South Korea",
-            "IL" => "🇮🇱 Israel",
-            _ => $"🌍 {countryCode}"
-        };
     }
 
     private InlineKeyboardMarkup CreateSubscribeButton(string launchId, long userId, Models.Launch? launch = null, bool showingRussian = true)
@@ -407,8 +415,7 @@ public class BotHandlers
             {
                 var timezoneOffset = _database.GetUserTimezoneOffset(userId);
                 var localNotificationTime = subscription.NotificationTime.AddHours(timezoneOffset);
-                var timezoneDisplay = timezoneOffset >= 0 ? $"+{timezoneOffset}" : $"{timezoneOffset}";
-                var notificationTimeStr = $"{localNotificationTime:dd.MM HH:mm} (UTC{timezoneDisplay})";
+                var notificationTimeStr = $"{localNotificationTime:dd.MM HH:mm} (UTC{MessageFormatter.FormatOffset(timezoneOffset)})";
 
                 buttons.Add(new[]
                 {
@@ -465,21 +472,6 @@ public class BotHandlers
         return new InlineKeyboardMarkup(buttons);
     }
 
-    private InlineKeyboardMarkup CreateUnsubscribeButton(string launchId, DateTime notificationTime, int timezoneOffset)
-    {
-        var buttons = new List<InlineKeyboardButton[]>();
-        var localNotificationTime = notificationTime.AddHours(timezoneOffset);
-        var timezoneDisplay = timezoneOffset >= 0 ? $"+{timezoneOffset}" : $"{timezoneOffset}";
-        var notificationTimeStr = $"{localNotificationTime:dd.MM HH:mm} (UTC{timezoneDisplay})";
-
-        buttons.Add(new[]
-        {
-            InlineKeyboardButton.WithCallbackData($"❌ Отписаться (🕐 {notificationTimeStr})", $"unsubscribe_{launchId}")
-        });
-
-        return new InlineKeyboardMarkup(buttons);
-    }
-
     private async Task HandlePreferenceChange(long chatId, long userId, string data, int messageId, string callbackQueryId)
     {
         var preference = data switch
@@ -510,7 +502,11 @@ public class BotHandlers
         {
             await _botClient.EditMessageText(chatId, messageId, message, replyMarkup: keyboard);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            // Обычно «message is not modified» при повторном выборе той же настройки
+            Console.WriteLine($"⚠️ Settings message edit failed for user {userId}: {ex.Message}");
+        }
     }
 
     private InlineKeyboardMarkup CreateSettingsKeyboard(NotificationPreference currentPreference)
@@ -602,9 +598,15 @@ public class BotHandlers
             return;
         }
 
+        // Callback data может быть подделана клиентом — валидируем так же строго, как /setrating
         var parts = data.Split('_');
+        if (parts.Length != 3 || !int.TryParse(parts[2], out var rating) || rating < 1 || rating > 5)
+        {
+            await _botClient.AnswerCallbackQuery(callbackQueryId, "❌ Ошибка", showAlert: true);
+            return;
+        }
+
         var launchId = parts[1];
-        var rating = int.Parse(parts[2]);
 
         var success = _database.UpdateSpectacleRating(launchId, rating);
         if (success)
@@ -616,14 +618,17 @@ public class BotHandlers
             if (launch != null)
             {
                 var timezoneOffset = _database.GetUserTimezoneOffset(userId);
-                var message = FormatLaunchMessage(launch, timezoneOffset, useRussian: true);
+                var message = MessageFormatter.FormatLaunchMessage(launch, timezoneOffset, useRussian: true);
                 var keyboard = CreateSubscribeButton(launchId, userId, launch, showingRussian: true);
 
                 try
                 {
-                    await _botClient.EditMessageText(chatId, messageId, message, replyMarkup: keyboard, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown);
+                    await _botClient.EditMessageText(chatId, messageId, message, replyMarkup: keyboard, parseMode: ParseMode.Markdown);
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠️ Rating message edit failed for launch {launchId}: {ex.Message}");
+                }
             }
         }
         else
@@ -653,18 +658,34 @@ public class BotHandlers
         }
 
         var timezoneOffset = _database.GetUserTimezoneOffset(userId);
-        var message = FormatLaunchMessage(launch, timezoneOffset, useRussian);
+        var message = MessageFormatter.FormatLaunchMessage(launch, timezoneOffset, useRussian);
         var keyboard = CreateSubscribeButton(launchId, userId, launch, showingRussian: useRussian);
 
         try
         {
-            await _botClient.EditMessageText(chatId, messageId, message, replyMarkup: keyboard, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown);
+            await _botClient.EditMessageText(chatId, messageId, message, replyMarkup: keyboard, parseMode: ParseMode.Markdown);
             await _botClient.AnswerCallbackQuery(callbackQueryId, useRussian ? "🇷🇺 Перевод" : "🇬🇧 Original");
         }
         catch (Exception ex)
         {
             await _botClient.AnswerCallbackQuery(callbackQueryId, "❌ Ошибка при обновлении");
             Console.WriteLine($"❌ Language toggle failed for user {userId}: {ex}");
+        }
+    }
+
+    private async Task TryEditReplyMarkup(long chatId, int messageId, InlineKeyboardMarkup keyboard)
+    {
+        if (chatId == 0 || messageId == 0)
+            return;
+
+        try
+        {
+            await _botClient.EditMessageReplyMarkup(chatId, messageId, replyMarkup: keyboard);
+        }
+        catch (Exception ex)
+        {
+            // Сообщение могло устареть или быть удалено — не критично, но логируем
+            Console.WriteLine($"⚠️ Reply markup edit failed (chat {chatId}, message {messageId}): {ex.Message}");
         }
     }
 }

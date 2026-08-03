@@ -6,6 +6,8 @@ namespace SpaceRadarBot.Services;
 
 public class NotificationService
 {
+    private static readonly TimeSpan TickInterval = TimeSpan.FromMinutes(1);
+
     private readonly ITelegramBotClient _botClient;
     private readonly DatabaseService _database;
     private readonly LaunchService _launchService;
@@ -23,7 +25,10 @@ public class NotificationService
 
     public void Start()
     {
-        _timer = new Timer(async _ => await CheckAndSendNotifications(), null, TimeSpan.Zero, TimeSpan.FromMinutes(1));
+        // Непериодический таймер: следующий тик взводится только после завершения текущего,
+        // иначе долгий тик (медленный Telegram) накладывался бы на следующий и дублировал отправки.
+        _timer = new Timer(async _ => await TickAsync(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        _timer.Change(TimeSpan.Zero, Timeout.InfiniteTimeSpan);
     }
 
     public void Stop()
@@ -31,17 +36,28 @@ public class NotificationService
         _timer?.Dispose();
     }
 
-    private async Task CheckAndSendNotifications()
+    private async Task TickAsync()
     {
         try
         {
             await ProcessPostponementNotifications();
-            await ProcessManualSubscriptions();
+            await ProcessDueNotifications();
             await ProcessAutomaticSubscriptions();
         }
         catch (Exception ex)
         {
             Console.WriteLine($"❌ Notification service tick failed: {ex}");
+        }
+        finally
+        {
+            try
+            {
+                _timer?.Change(TickInterval, Timeout.InfiniteTimeSpan);
+            }
+            catch (ObjectDisposedException)
+            {
+                // Сервис остановлен во время тика — перевзводить нечего
+            }
         }
     }
 
@@ -53,8 +69,15 @@ public class NotificationService
 
             foreach (var postponement in pendingPostponements)
             {
+                // Новое время уже в прошлом — сообщение о переносе бессмысленно
+                if (postponement.NewLaunchTime <= DateTime.UtcNow)
+                {
+                    _database.MarkPostponementNotificationSent(postponement.Id);
+                    continue;
+                }
+
                 var timezoneOffset = _database.GetUserTimezoneOffset(postponement.UserId);
-                var message = FormatPostponementMessage(
+                var message = MessageFormatter.FormatPostponementMessage(
                     postponement.LaunchName,
                     postponement.OldLaunchTime,
                     postponement.NewLaunchTime,
@@ -78,7 +101,8 @@ public class NotificationService
         }
     }
 
-    private async Task ProcessManualSubscriptions()
+    // Обрабатывает все подписки с наступившим временем уведомления — и ручные, и автоматические.
+    private async Task ProcessDueNotifications()
     {
         try
         {
@@ -88,32 +112,42 @@ public class NotificationService
             {
                 var launch = await _launchService.GetLaunchByIdAsync(subscription.LaunchId);
 
-                if (launch != null)
-                {
-                    var timezoneOffset = _database.GetUserTimezoneOffset(subscription.UserId);
-                    var message = FormatNotificationMessage(launch, timezoneOffset);
-
-                    try
-                    {
-                        await _botClient.SendMessage(subscription.UserId, message, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown, disableNotification: false);
-                        _database.MarkNotificationSent(subscription.Id);
-                        Console.WriteLine($"✅ Notification sent to user {subscription.UserId} for launch {launch.Name}");
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"❌ Failed to send notification to user {subscription.UserId} (launch {launch.Name}): {ex.Message}");
-                    }
-                }
-                else
+                if (launch == null)
                 {
                     Console.WriteLine($"⚠️ Launch {subscription.LaunchId} not found in database. Marking as sent.");
                     _database.MarkNotificationSent(subscription.Id);
+                    continue;
+                }
+
+                // Фактические минуты до старта: после переносов уведомление может сработать
+                // не за 30 минут, а позже — или когда запуск уже прошёл.
+                var minutesUntilLaunch = (int)Math.Round((launch.LaunchTime - DateTime.UtcNow).TotalMinutes);
+
+                if (minutesUntilLaunch <= 0)
+                {
+                    Console.WriteLine($"⚠️ Launch {launch.Name} already happened ({-minutesUntilLaunch} min ago). Skipping notification.");
+                    _database.MarkNotificationSent(subscription.Id);
+                    continue;
+                }
+
+                var timezoneOffset = _database.GetUserTimezoneOffset(subscription.UserId);
+                var message = MessageFormatter.FormatNotificationMessage(launch, timezoneOffset, minutesUntilLaunch);
+
+                try
+                {
+                    await _botClient.SendMessage(subscription.UserId, message, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown, disableNotification: false);
+                    _database.MarkNotificationSent(subscription.Id);
+                    Console.WriteLine($"✅ Notification sent to user {subscription.UserId} for launch {launch.Name}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"❌ Failed to send notification to user {subscription.UserId} (launch {launch.Name}): {ex.Message}");
                 }
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"❌ ProcessManualSubscriptions failed: {ex}");
+            Console.WriteLine($"❌ ProcessDueNotifications failed: {ex}");
         }
     }
 
@@ -126,7 +160,7 @@ public class NotificationService
 
             foreach (var userId in usersWithPreferences)
             {
-                await CleanupIncompatibleAutomaticSubscriptions(userId, upcomingLaunches);
+                CleanupIncompatibleAutomaticSubscriptions(userId, upcomingLaunches);
                 await CreateAutomaticSubscriptionsForUser(userId, upcomingLaunches);
             }
         }
@@ -147,15 +181,20 @@ public class NotificationService
 
             var upcomingLaunches = launches ?? await _launchService.GetAllUpcomingLaunchesAsync();
 
+            // Подписки и блэклист забираем одним запросом на пользователя,
+            // а не парой запросов на каждый запуск каждую минуту.
+            var subscribedLaunchIds = _database.GetUserSubscribedLaunchIds(userId);
+            var blacklistedLaunchIds = _database.GetUserBlacklistedLaunchIds(userId);
+
             foreach (var launch in upcomingLaunches)
             {
-                if (!ShouldNotifyUser(preference, launch.SpectacleRating))
+                if (!preference.Matches(launch.SpectacleRating))
                     continue;
 
-                if (_database.IsUserSubscribed(userId, launch.Id))
+                if (subscribedLaunchIds.Contains(launch.Id))
                     continue;
 
-                if (_database.IsBlacklisted(userId, launch.Id))
+                if (blacklistedLaunchIds.Contains(launch.Id))
                     continue;
 
                 var notificationTime = DateTime.SpecifyKind(launch.LaunchTime.ToUniversalTime().AddMinutes(-30), DateTimeKind.Utc);
@@ -173,18 +212,7 @@ public class NotificationService
         }
     }
 
-    private bool ShouldNotifyUser(NotificationPreference preference, int spectacleRating)
-    {
-        return preference switch
-        {
-            NotificationPreference.AllLaunches => true,
-            NotificationPreference.FiveStarsOnly => spectacleRating == 5,
-            NotificationPreference.FourStarsAndAbove => spectacleRating >= 4,
-            _ => false
-        };
-    }
-
-    private async Task CleanupIncompatibleAutomaticSubscriptions(long userId, List<Launch> upcomingLaunches)
+    private void CleanupIncompatibleAutomaticSubscriptions(long userId, List<Launch> upcomingLaunches)
     {
         try
         {
@@ -201,7 +229,7 @@ public class NotificationService
                 if (!launchDict.TryGetValue(subscription.LaunchId, out var launch))
                     continue;
 
-                if (!ShouldNotifyUser(preference, launch.SpectacleRating))
+                if (!preference.Matches(launch.SpectacleRating))
                 {
                     _database.RemoveSubscriptionById(subscription.Id);
                     Console.WriteLine($"🗑️ Removed automatic subscription for user {userId} from launch {launch.Name} (rating changed from user preference)");
@@ -212,121 +240,5 @@ public class NotificationService
         {
             Console.WriteLine($"❌ CleanupIncompatibleAutomaticSubscriptions failed for user {userId}: {ex}");
         }
-    }
-
-    private string FormatNotificationMessage(Launch launch, int timezoneOffset)
-    {
-        var stars = new string('⭐', launch.SpectacleRating);
-        var country = GetCountryDisplay(launch.CountryCode);
-        var formattedTime = LaunchService.FormatLaunchTime(launch.LaunchTime, timezoneOffset);
-
-        var message = $"🚀 *ЗАПУСК ЧЕРЕЗ 30 МИНУТ!*\n\n" +
-                     $"*{SanitizeMd(launch.Name)}*\n\n" +
-                     $"📍 {country}\n" +
-                     $"🕐 {formattedTime}\n" +
-                     $"✨ {stars}";
-
-        // Add booster information if available (handles multiple boosters like Falcon Heavy)
-        if (launch.Boosters != null && launch.Boosters.Count > 0)
-        {
-            foreach (var booster in launch.Boosters)
-            {
-                if (!string.IsNullOrEmpty(booster.SerialNumber))
-                {
-                    var flightInfo = "";
-                    if (booster.FlightNumber.HasValue)
-                    {
-                        var flightNum = booster.FlightNumber.Value;
-                        var flightOrdinal = FormatFlightNumber(flightNum);
-                        flightInfo = $" ({flightOrdinal} полёт)";
-                    }
-
-                    var reusedIcon = booster.Reused == true ? "♻️" : "🆕";
-                    message += $"\n{reusedIcon} Бустер {SanitizeMd(booster.SerialNumber)}{flightInfo}";
-
-                    if (booster.LandingAttempt == true)
-                    {
-                        message += " 🎯";
-                    }
-                }
-            }
-        }
-
-        // Show Russian description if available, otherwise fall back to English
-        var description = !string.IsNullOrEmpty(launch.DescriptionRu)
-            ? $"{SanitizeMd(launch.DescriptionRu)}\n\n_Переведено с помощью AI_"
-            : (!string.IsNullOrEmpty(launch.Description) ? SanitizeMd(launch.Description) : null);
-        if (!string.IsNullOrEmpty(description))
-        {
-            message += $"\n\n{description}";
-        }
-
-        if (!string.IsNullOrEmpty(launch.LiveStreamUrl))
-        {
-            message += $"\n\n🎥 [Смотреть прямой эфир]({launch.LiveStreamUrl})";
-        }
-
-        return message;
-    }
-
-    private string FormatPostponementMessage(string launchName, DateTime oldTime, DateTime newTime, int timezoneOffset)
-    {
-        var oldLocalTime = oldTime.AddHours(timezoneOffset);
-        var newLocalTime = newTime.AddHours(timezoneOffset);
-        var newNotificationTime = newTime.AddMinutes(-30).AddHours(timezoneOffset);
-
-        var timezoneDisplay = timezoneOffset >= 0 ? $"+{timezoneOffset}" : $"{timezoneOffset}";
-
-        var message = $"⏰ *ПЕРЕНОС!*\n\n" +
-                     $"🚀 *{SanitizeMd(launchName)}*\n\n" +
-                     $"Старое время: {oldLocalTime:dd.MM.yyyy HH:mm} (UTC{timezoneDisplay})\n" +
-                     $"Новое время: {newLocalTime:dd.MM.yyyy HH:mm} (UTC{timezoneDisplay})\n\n" +
-                     $"Ваше уведомление перенесено на {newNotificationTime:dd.MM.yyyy HH:mm} (UTC{timezoneDisplay})";
-
-        return message;
-    }
-
-    // Legacy Markdown does not support backslash escape, so we strip the four special chars
-    // (_, *, [, `) from user-supplied content to keep Telegram's parser happy.
-    private static string SanitizeMd(string s)
-    {
-        if (string.IsNullOrEmpty(s)) return s;
-        return s.Replace("_", " ").Replace("*", "").Replace("[", "(").Replace("`", "'");
-    }
-
-    private string FormatFlightNumber(int number)
-    {
-        return number switch
-        {
-            1 => "1-й",
-            2 => "2-й",
-            3 => "3-й",
-            _ => $"{number}-й"
-        };
-    }
-
-    private string GetCountryDisplay(string? countryCode)
-    {
-        if (string.IsNullOrEmpty(countryCode))
-            return "🌍 Unknown";
-
-        return countryCode.ToUpper() switch
-        {
-            "US" => "🇺🇸 USA",
-            "RU" => "🇷🇺 Russia",
-            "CN" => "🇨🇳 China",
-            "GF" => "🇪🇺 French Guiana",
-            "IN" => "🇮🇳 India",
-            "JP" => "🇯🇵 Japan",
-            "NZ" => "🇳🇿 New Zealand",
-            "KZ" => "🇰🇿 Kazakhstan",
-            "FR" => "🇫🇷 France",
-            "GB" => "🇬🇧 United Kingdom",
-            "IT" => "🇮🇹 Italy",
-            "IR" => "🇮🇷 Iran",
-            "KR" => "🇰🇷 South Korea",
-            "IL" => "🇮🇱 Israel",
-            _ => $"🌍 {countryCode}"
-        };
     }
 }

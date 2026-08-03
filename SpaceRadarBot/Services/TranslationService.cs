@@ -1,18 +1,20 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace SpaceRadarBot.Services;
 
 public class TranslationService
 {
     private readonly HttpClient _httpClient;
-    private readonly string _apiKey;
     private readonly string _model;
     private const string OpenAiApiUrl = "https://api.openai.com/v1/chat/completions";
 
-    public TranslationService(string apiKey, string model = "gpt-3.5-turbo")
+    // С запасом для длинных описаний: обрезанный перевод кэшировался бы в БД навсегда.
+    private const int MaxCompletionTokens = 1000;
+
+    public TranslationService(string apiKey, string model = "gpt-4o-mini")
     {
-        _apiKey = apiKey;
         _model = model;
         _httpClient = new HttpClient();
         _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
@@ -42,7 +44,7 @@ public class TranslationService
                     }
                 },
                 temperature = 0.3,
-                max_tokens = 500
+                max_tokens = MaxCompletionTokens
             };
 
             var json = JsonSerializer.Serialize(requestBody);
@@ -57,36 +59,28 @@ public class TranslationService
                 return null;
             }
 
-            var result = JsonSerializer.Deserialize<OpenAiResponse>(responseContent, new JsonSerializerOptions 
-            { 
-                PropertyNameCaseInsensitive = true 
+            var result = JsonSerializer.Deserialize<OpenAiResponse>(responseContent, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
             });
-            var translation = result?.Choices?.FirstOrDefault()?.Message?.Content?.Trim();
+            var choice = result?.Choices?.FirstOrDefault();
 
-            return translation;
+            // Обрезанный перевод не возвращаем: он закэшируется в DescriptionRu навсегда
+            // и никогда не будет перепереведён. Лучше показать оригинал и попробовать
+            // ещё раз на следующем синке.
+            if (choice?.FinishReason == "length")
+            {
+                Console.WriteLine($"⚠️ Translation truncated at {MaxCompletionTokens} tokens, discarding (text length: {text.Length})");
+                return null;
+            }
+
+            return choice?.Message?.Content?.Trim();
         }
         catch (Exception ex)
         {
             Console.WriteLine($"❌ Translation error: {ex.Message}");
             return null;
         }
-    }
-
-    public async Task<Dictionary<string, string>> TranslateBatchAsync(Dictionary<string, string> texts)
-    {
-        var results = new Dictionary<string, string>();
-
-        foreach (var (key, text) in texts)
-        {
-            var translation = await TranslateToRussianAsync(text);
-            if (translation != null)
-            {
-                results[key] = translation;
-            }
-            await Task.Delay(100); // Rate limiting
-        }
-
-        return results;
     }
 
     private class OpenAiResponse
@@ -97,6 +91,9 @@ public class TranslationService
     private class Choice
     {
         public Message? Message { get; set; }
+
+        [JsonPropertyName("finish_reason")]
+        public string? FinishReason { get; set; }
     }
 
     private class Message

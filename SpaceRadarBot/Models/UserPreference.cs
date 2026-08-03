@@ -18,3 +18,21 @@ public enum NotificationPreference
     FiveStarsOnly = 2,
     FourStarsAndAbove = 3
 }
+
+/// <summary>
+/// Единственное место, где настройка уведомлений сопоставляется с рейтингом запуска.
+/// Раньше логика дублировалась в DatabaseService и NotificationService.
+/// </summary>
+public static class NotificationPreferenceExtensions
+{
+    public static bool Matches(this NotificationPreference preference, int spectacleRating)
+    {
+        return preference switch
+        {
+            NotificationPreference.AllLaunches => true,
+            NotificationPreference.FiveStarsOnly => spectacleRating == 5,
+            NotificationPreference.FourStarsAndAbove => spectacleRating >= 4,
+            _ => false
+        };
+    }
+}

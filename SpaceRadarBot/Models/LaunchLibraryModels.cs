@@ -6,6 +6,10 @@ public class LaunchLibraryResponse
 {
     [JsonPropertyName("results")]
     public List<LaunchLibraryLaunch> Results { get; set; } = new();
+
+    // Ссылка на следующую страницу выдачи (null на последней)
+    [JsonPropertyName("next")]
+    public string? Next { get; set; }
 }
 
 public class LaunchLibraryLaunch
@@ -27,9 +31,6 @@ public class LaunchLibraryLaunch
 
     [JsonPropertyName("pad")]
     public PadInfo? Pad { get; set; }
-
-    [JsonPropertyName("webcast_live")]
-    public bool WebcastLive { get; set; }
 
     [JsonPropertyName("vid_urls")]
     public List<VideoUrl>? VidUrls { get; set; }
@@ -103,12 +104,6 @@ public class MissionInfo
 
 public class OrbitInfo
 {
-    [JsonPropertyName("id")]
-    public int Id { get; set; }
-
-    [JsonPropertyName("name")]
-    public string? Name { get; set; }
-
     [JsonPropertyName("abbrev")]
     public string? Abbrev { get; set; }
 }

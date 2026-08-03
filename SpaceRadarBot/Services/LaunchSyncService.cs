@@ -9,22 +9,32 @@ public class LaunchSyncService
     private readonly HttpClient _httpClient;
     private readonly DatabaseService _database;
     private readonly TranslationService? _translationService;
+    private readonly TimeSpan _syncInterval;
     private Timer? _timer;
-    private const string BaseUrl = "https://ll.thespacedevs.com/2.3.0/launches";
-    private const int SyncIntervalMinutes = 10;
 
-    public LaunchSyncService(DatabaseService database, TranslationService? translationService = null)
+    private const string BaseUrl = "https://ll.thespacedevs.com/2.3.0/launches";
+
+    // Анонимный лимит Launch Library — 15 запросов/час с IP.
+    // При интервале 10 мин: 6 синков/час × 2 страницы = 12 запросов — с запасом.
+    private const int MaxPagesPerSync = 2;
+    private const int PageSize = 50;
+
+    public LaunchSyncService(DatabaseService database, TranslationService? translationService = null, int syncIntervalMinutes = 10)
     {
         _database = database;
         _translationService = translationService;
+        _syncInterval = TimeSpan.FromMinutes(syncIntervalMinutes);
         _httpClient = new HttpClient();
         _httpClient.DefaultRequestHeaders.Add("User-Agent", "SpaceRadarBot/1.0");
     }
 
     public void Start()
     {
-        Console.WriteLine("🔄 Starting launch sync service...");
-        _timer = new Timer(async _ => await SyncLaunches(), null, TimeSpan.Zero, TimeSpan.FromMinutes(SyncIntervalMinutes));
+        Console.WriteLine($"🔄 Starting launch sync service (every {_syncInterval.TotalMinutes:F0} min)...");
+        // Непериодический таймер: следующий тик взводится после завершения текущего,
+        // чтобы долгий синк (переводы, медленный API) не накладывался на следующий.
+        _timer = new Timer(async _ => await SyncLaunches(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        _timer.Change(TimeSpan.Zero, Timeout.InfiniteTimeSpan);
     }
 
     public void Stop()
@@ -58,10 +68,22 @@ public class LaunchSyncService
             }
 
             _database.RemoveOldLaunches(30);
+            _database.CleanupOrphanedData();
         }
         catch (Exception ex)
         {
             Console.WriteLine($"❌ Error syncing launches: {ex.Message}");
+        }
+        finally
+        {
+            try
+            {
+                _timer?.Change(_syncInterval, Timeout.InfiniteTimeSpan);
+            }
+            catch (ObjectDisposedException)
+            {
+                // Сервис остановлен во время синка
+            }
         }
     }
 
@@ -69,20 +91,31 @@ public class LaunchSyncService
     {
         try
         {
-            var apiUrl = $"{baseApiUrl}?mode=detailed&limit=20";
-            Console.WriteLine($"📥 Fetching launches from {apiUrl}");
+            var results = new List<LaunchLibraryLaunch>();
+            var apiUrl = $"{baseApiUrl}?mode=detailed&limit={PageSize}";
 
-            var response = await _httpClient.GetStringAsync(apiUrl);
-            var data = JsonSerializer.Deserialize<LaunchLibraryResponse>(response);
+            for (var page = 0; page < MaxPagesPerSync && apiUrl != null; page++)
+            {
+                Console.WriteLine($"📥 Fetching launches from {apiUrl}");
 
-            if (data?.Results == null || data.Results.Count == 0)
+                var response = await _httpClient.GetStringAsync(apiUrl);
+                var data = JsonSerializer.Deserialize<LaunchLibraryResponse>(response);
+
+                if (data?.Results == null || data.Results.Count == 0)
+                    break;
+
+                results.AddRange(data.Results);
+                apiUrl = data.Next;
+            }
+
+            if (results.Count == 0)
             {
                 Console.WriteLine("⚠️ No results returned from API");
                 return new List<Launch>();
             }
 
             var now = DateTime.UtcNow;
-            var launches = data.Results.Select(l =>
+            var launches = results.Select(l =>
             {
                 // Extract all booster information (for rockets like Falcon Heavy with multiple cores)
                 var boosters = l.Rocket?.LauncherStage?.Select(stage => new BoosterInfo
@@ -102,12 +135,11 @@ public class LaunchSyncService
                     CountryCode = l.LaunchServiceProvider?.Countries?.FirstOrDefault()?.Alpha2Code,
                     LaunchTime = DateTime.SpecifyKind(l.Net.ToUniversalTime(), DateTimeKind.Utc),
                     LiveStreamUrl = GetLiveStreamUrl(l),
-                    SpectacleRating = CalculateSpectacleRating(l),
+                    SpectacleRating = SpectacleRatingCalculator.Calculate(l),
                     Description = l.Mission?.Description,
                     Orbit = l.Mission?.Orbit?.Abbrev,
                     Boosters = boosters,
-                    LastUpdated = now,
-                    CachedAt = now
+                    LastUpdated = now
                 };
             }).ToList();
 
@@ -144,58 +176,6 @@ public class LaunchSyncService
         return highestPriorityVideo?.Url;
     }
 
-    private int CalculateSpectacleRating(LaunchLibraryLaunch launch)
-    {
-        int rating = 3;
-
-        var missionName = launch.Name?.ToLower() ?? "";
-        var description = launch.Mission?.Description?.ToLower() ?? "";
-
-        // Check for crewed missions (highest priority)
-        var crewedKeywords = new[] { "crew", "crewed", "astronaut", "cosmonaut", "human", "manned", "iss crew" };
-        if (crewedKeywords.Any(k => description.Contains(k) || missionName.Contains(k)))
-        {
-            return 5;
-        }
-
-        // Check for interplanetary/deep space missions
-        var orbit = launch.Mission?.Orbit?.Abbrev?.ToLower() ?? "";
-        var spectacularOrbits = new[]
-        {
-            "solar esc.", "jupiter orbit", "mars", "venus", "l2", "l1-point", "asteroid",
-            "lo", "lunar flyby", "lunar impactor", "mars flyby", "venus flyby",
-            "mercury flyby"
-        };
-
-        if (spectacularOrbits.Any(o => orbit.Contains(o.ToLower())))
-        {
-            return 5;
-        }
-
-        // Check rocket type
-        var rocketName = launch.Rocket?.Configuration?.Name?.ToLower() ?? "";
-
-        if (rocketName.Contains("falcon heavy") || rocketName.Contains("starship") || rocketName.Contains("sls") || rocketName.Contains("new glenn"))
-            rating = 5;
-        else if (rocketName.Contains("falcon 9") && !missionName.Contains("starlink"))
-            rating = 4;
-
-        // Upgrade rating for special missions (don't downgrade)
-        var firstFlightKeywords = new[] { "maiden flight", "first flight", "inaugural", "debut" };
-        if (firstFlightKeywords.Any(k => missionName.Contains(k) || description.Contains(k)))
-        {
-            rating = Math.Max(rating, 4);
-        }
-
-        var demoFlightKeywords = new[] { "demo flight", "test flight", "demonstration" };
-        if (demoFlightKeywords.Any(k => missionName.Contains(k) || description.Contains(k)))
-        {
-            rating = Math.Max(rating, 4);
-        }
-
-        return Math.Max(1, Math.Min(5, rating));
-    }
-
     private async Task TranslateLaunchDescriptions(List<Launch> launches)
     {
         try
@@ -208,9 +188,9 @@ public class LaunchSyncService
                 {
                     // Check if translation already exists in DB
                     var existingLaunch = _database.GetLaunchById(launch.Id);
-                    if (existingLaunch?.DescriptionRu != null)
+                    if (!string.IsNullOrWhiteSpace(existingLaunch?.DescriptionRu))
                     {
-                        launch.DescriptionRu = existingLaunch.DescriptionRu;
+                        launch.DescriptionRu = existingLaunch!.DescriptionRu;
                         continue;
                     }
 

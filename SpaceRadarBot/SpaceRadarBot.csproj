@@ -8,7 +8,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Telegram.Bot" Version="21.14.1" />
+    <!-- 21.14.1 снят с публикации в NuGet и молча резолвился в 22.0.0 — фиксируем явно -->
+    <PackageReference Include="Telegram.Bot" Version="22.0.0" />
     <PackageReference Include="LiteDB" Version="5.0.21" />
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="9.0.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="9.0.0" />
@@ -22,10 +23,6 @@
     <None Update="appsettings.example.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-  </ItemGroup>
-
-  <ItemGroup>
-    <Folder Include="Examples\" />
   </ItemGroup>
 
 </Project>
