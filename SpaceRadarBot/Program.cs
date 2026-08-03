@@ -60,12 +60,16 @@ var syncIntervalMinutes = int.TryParse(configuration["Sync:IntervalMinutes"], ou
     ? parsedInterval
     : 10;
 
-var launchSyncService = new LaunchSyncService(database, translationService, syncIntervalMinutes);
-launchSyncService.Start();
-
 var launchService = new LaunchService(database);
 var notificationService = new NotificationService(botClient, database, launchService);
 var botHandlers = new BotHandlers(botClient, launchService, database, notificationService, configuration, me.Username ?? "");
+
+// Автоподписки пересчитываются событийно — сразу после каждого синка запусков
+var launchSyncService = new LaunchSyncService(database, translationService, syncIntervalMinutes)
+{
+    LaunchesSynced = notificationService.RunAutomaticSubscriptionsAsync
+};
+launchSyncService.Start();
 
 notificationService.Start();
 Console.WriteLine("✅ Notification service started");

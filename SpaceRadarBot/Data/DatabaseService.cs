@@ -501,6 +501,8 @@ public class DatabaseService : IDisposable
             if (existing != null)
             {
                 existing.LastInteractionAt = now;
+                // Пользователь написал боту — значит, разблокировал его
+                existing.IsBlocked = false;
                 userPreferences.Update(existing);
             }
             else
@@ -523,9 +525,29 @@ public class DatabaseService : IDisposable
         var userPreferences = _db.GetCollection<UserPreference>("userPreferences");
 
         return userPreferences
-            .Find(u => u.Preference != NotificationPreference.None)
+            .Find(u => u.Preference != NotificationPreference.None && !u.IsBlocked)
             .Select(u => u.UserId)
             .ToList();
+    }
+
+    public HashSet<long> GetBlockedUserIds()
+    {
+        var userPreferences = _db.GetCollection<UserPreference>("userPreferences");
+        return userPreferences.Find(u => u.IsBlocked).Select(u => u.UserId).ToHashSet();
+    }
+
+    public void SetUserBlocked(long userId, bool blocked)
+    {
+        lock (_writeLock)
+        {
+            var userPreferences = _db.GetCollection<UserPreference>("userPreferences");
+            var existing = userPreferences.FindOne(u => u.UserId == userId);
+            if (existing != null && existing.IsBlocked != blocked)
+            {
+                existing.IsBlocked = blocked;
+                userPreferences.Update(existing);
+            }
+        }
     }
 
     public (int total, int manual, int automatic, int pending) GetUserSubscriptionCounts(long userId)

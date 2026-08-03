@@ -1,6 +1,8 @@
 using SpaceRadarBot.Data;
 using SpaceRadarBot.Models;
 using Telegram.Bot;
+using Telegram.Bot.Exceptions;
+using Telegram.Bot.Types.Enums;
 
 namespace SpaceRadarBot.Services;
 
@@ -8,10 +10,19 @@ public class NotificationService
 {
     private static readonly TimeSpan TickInterval = TimeSpan.FromMinutes(1);
 
+    // Telegram даёт боту ~30 сообщений/сек суммарно; держимся ниже с запасом,
+    // отправляя пачками по MaxMessagesPerSecond с паузой до целой секунды.
+    private const int MaxMessagesPerSecond = 20;
+
+    // Автоподписки пересчитываются по событиям (после синка и после смены настроек);
+    // редкий скан по таймеру — только страховка на случай пропущенного события.
+    private const int AutoSubscriptionFallbackTicks = 30;
+
     private readonly ITelegramBotClient _botClient;
     private readonly DatabaseService _database;
     private readonly LaunchService _launchService;
     private Timer? _timer;
+    private int _tickCount;
 
     public NotificationService(
         ITelegramBotClient botClient,
@@ -42,7 +53,12 @@ public class NotificationService
         {
             await ProcessPostponementNotifications();
             await ProcessDueNotifications();
-            await ProcessAutomaticSubscriptions();
+
+            _tickCount++;
+            if (_tickCount % AutoSubscriptionFallbackTicks == 0)
+            {
+                await RunAutomaticSubscriptionsAsync();
+            }
         }
         catch (Exception ex)
         {
@@ -61,16 +77,61 @@ public class NotificationService
         }
     }
 
+    /// <summary>
+    /// Шлёт сообщения пачками по MaxMessagesPerSecond параллельно, добирая паузу до секунды
+    /// между пачками. Последовательная отправка (~5-8 msg/сек из-за RTT) на популярном запуске
+    /// растягивала бы рассылку на минуты; лимит Telegram ~30 msg/сек всё равно не превышаем.
+    /// </summary>
+    private static async Task SendThrottledAsync<T>(IReadOnlyList<T> items, Func<T, Task> sendOne)
+    {
+        for (var offset = 0; offset < items.Count; offset += MaxMessagesPerSecond)
+        {
+            var batch = items.Skip(offset).Take(MaxMessagesPerSecond).ToList();
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+            await Task.WhenAll(batch.Select(sendOne));
+
+            var remaining = TimeSpan.FromSeconds(1) - stopwatch.Elapsed;
+            if (offset + MaxMessagesPerSecond < items.Count && remaining > TimeSpan.Zero)
+            {
+                await Task.Delay(remaining);
+            }
+        }
+    }
+
+    // 403 = пользователь заблокировал бота: помечаем и больше не шлём (флаг снимется,
+    // когда пользователь снова напишет боту). Возвращает true, если ошибка обработана.
+    private bool HandleBlockedUser(ApiRequestException ex, long userId)
+    {
+        if (ex.ErrorCode != 403)
+            return false;
+
+        _database.SetUserBlocked(userId, true);
+        Console.WriteLine($"🚫 User {userId} blocked the bot — marked, notifications suspended");
+        return true;
+    }
+
     private async Task ProcessPostponementNotifications()
     {
         try
         {
             var pendingPostponements = _database.GetPendingPostponementNotifications();
+            if (pendingPostponements.Count == 0)
+                return;
+
+            var blockedUsers = _database.GetBlockedUserIds();
+            var toSend = new List<(PostponementNotification postponement, string message)>();
 
             foreach (var postponement in pendingPostponements)
             {
                 // Новое время уже в прошлом — сообщение о переносе бессмысленно
                 if (postponement.NewLaunchTime <= DateTime.UtcNow)
+                {
+                    _database.MarkPostponementNotificationSent(postponement.Id);
+                    continue;
+                }
+
+                if (blockedUsers.Contains(postponement.UserId))
                 {
                     _database.MarkPostponementNotificationSent(postponement.Id);
                     continue;
@@ -83,17 +144,27 @@ public class NotificationService
                     postponement.NewLaunchTime,
                     timezoneOffset);
 
+                toSend.Add((postponement, message));
+            }
+
+            await SendThrottledAsync(toSend, async item =>
+            {
                 try
                 {
-                    await _botClient.SendMessage(postponement.UserId, message, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown, disableNotification: false);
-                    _database.MarkPostponementNotificationSent(postponement.Id);
-                    Console.WriteLine($"📣 Postponement notification sent to user {postponement.UserId} for launch {postponement.LaunchName}");
+                    await _botClient.SendMessage(item.postponement.UserId, item.message, parseMode: ParseMode.Markdown, disableNotification: false);
+                    _database.MarkPostponementNotificationSent(item.postponement.Id);
+                    Console.WriteLine($"📣 Postponement notification sent to user {item.postponement.UserId} for launch {item.postponement.LaunchName}");
+                }
+                catch (ApiRequestException ex) when (HandleBlockedUser(ex, item.postponement.UserId))
+                {
+                    _database.MarkPostponementNotificationSent(item.postponement.Id);
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"❌ Failed to send postponement to user {postponement.UserId} (launch {postponement.LaunchName}): {ex.Message}");
+                    // Не помечаем отправленным — повторим следующим тиком
+                    Console.WriteLine($"❌ Failed to send postponement to user {item.postponement.UserId} (launch {item.postponement.LaunchName}): {ex.Message}");
                 }
-            }
+            });
         }
         catch (Exception ex)
         {
@@ -107,9 +178,20 @@ public class NotificationService
         try
         {
             var pendingNotifications = _database.GetPendingNotifications();
+            if (pendingNotifications.Count == 0)
+                return;
+
+            var blockedUsers = _database.GetBlockedUserIds();
+            var toSend = new List<(Subscription subscription, string message, string launchName)>();
 
             foreach (var subscription in pendingNotifications)
             {
+                if (blockedUsers.Contains(subscription.UserId))
+                {
+                    _database.MarkNotificationSent(subscription.Id);
+                    continue;
+                }
+
                 var launch = await _launchService.GetLaunchByIdAsync(subscription.LaunchId);
 
                 if (launch == null)
@@ -132,18 +214,27 @@ public class NotificationService
 
                 var timezoneOffset = _database.GetUserTimezoneOffset(subscription.UserId);
                 var message = MessageFormatter.FormatNotificationMessage(launch, timezoneOffset, minutesUntilLaunch);
+                toSend.Add((subscription, message, launch.Name));
+            }
 
+            await SendThrottledAsync(toSend, async item =>
+            {
                 try
                 {
-                    await _botClient.SendMessage(subscription.UserId, message, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown, disableNotification: false);
-                    _database.MarkNotificationSent(subscription.Id);
-                    Console.WriteLine($"✅ Notification sent to user {subscription.UserId} for launch {launch.Name}");
+                    await _botClient.SendMessage(item.subscription.UserId, item.message, parseMode: ParseMode.Markdown, disableNotification: false);
+                    _database.MarkNotificationSent(item.subscription.Id);
+                    Console.WriteLine($"✅ Notification sent to user {item.subscription.UserId} for launch {item.launchName}");
+                }
+                catch (ApiRequestException ex) when (HandleBlockedUser(ex, item.subscription.UserId))
+                {
+                    _database.MarkNotificationSent(item.subscription.Id);
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"❌ Failed to send notification to user {subscription.UserId} (launch {launch.Name}): {ex.Message}");
+                    // Не помечаем отправленным — повторим следующим тиком
+                    Console.WriteLine($"❌ Failed to send notification to user {item.subscription.UserId} (launch {item.launchName}): {ex.Message}");
                 }
-            }
+            });
         }
         catch (Exception ex)
         {
@@ -151,7 +242,13 @@ public class NotificationService
         }
     }
 
-    private async Task ProcessAutomaticSubscriptions()
+    /// <summary>
+    /// Полный пересчёт автоподписок всех активных пользователей. Вызывается по событиям
+    /// (после синка запусков, после смены настроек — точечно) и редким fallback-таймером,
+    /// а не каждую минуту: это O(пользователи × запуски), на shared-core машине
+    /// ежеминутный скан стал бы первым узким местом при росте аудитории.
+    /// </summary>
+    public async Task RunAutomaticSubscriptionsAsync()
     {
         try
         {
@@ -166,7 +263,7 @@ public class NotificationService
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"❌ ProcessAutomaticSubscriptions failed: {ex}");
+            Console.WriteLine($"❌ RunAutomaticSubscriptionsAsync failed: {ex}");
         }
     }
 
@@ -182,7 +279,7 @@ public class NotificationService
             var upcomingLaunches = launches ?? await _launchService.GetAllUpcomingLaunchesAsync();
 
             // Подписки и блэклист забираем одним запросом на пользователя,
-            // а не парой запросов на каждый запуск каждую минуту.
+            // а не парой запросов на каждый запуск.
             var subscribedLaunchIds = _database.GetUserSubscribedLaunchIds(userId);
             var blacklistedLaunchIds = _database.GetUserBlacklistedLaunchIds(userId);
 

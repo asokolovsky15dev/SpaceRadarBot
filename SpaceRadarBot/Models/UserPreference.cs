@@ -9,6 +9,10 @@ public class UserPreference
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
     public DateTime? LastInteractionAt { get; set; }
+
+    // Пользователь заблокировал бота (403 при отправке). Такие пропускаются в рассылках,
+    // чтобы не молотить вечные 403 каждый тик. Сбрасывается при любом входящем сообщении.
+    public bool IsBlocked { get; set; }
 }
 
 public enum NotificationPreference

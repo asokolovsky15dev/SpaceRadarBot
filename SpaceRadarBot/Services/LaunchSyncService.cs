@@ -14,6 +14,10 @@ public class LaunchSyncService
 
     private const string BaseUrl = "https://ll.thespacedevs.com/2.3.0/launches";
 
+    /// <summary>Вызывается после каждого успешного синка: рейтинги/времена могли измениться,
+    /// автоподписки нужно пересчитать. Событийная модель вместо ежеминутного скана.</summary>
+    public Func<Task>? LaunchesSynced { get; set; }
+
     // Анонимный лимит Launch Library — 15 запросов/час с IP.
     // При интервале 10 мин: 6 синков/час × 2 страницы = 12 запросов — с запасом.
     private const int MaxPagesPerSync = 2;
@@ -61,6 +65,18 @@ public class LaunchSyncService
 
                 _database.UpsertLaunches(upcomingLaunches);
                 Console.WriteLine($"✅ [{DateTime.Now:HH:mm:ss}] Synced {upcomingLaunches.Count} upcoming launches to database");
+
+                if (LaunchesSynced != null)
+                {
+                    try
+                    {
+                        await LaunchesSynced();
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"❌ Post-sync subscription refresh failed: {ex.Message}");
+                    }
+                }
             }
             else
             {
