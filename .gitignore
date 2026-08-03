@@ -3,6 +3,27 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/master/VisualStudio.gitignore
 
+# --- Project-specific (repo root) ---
+# LiteDB databases (incl. prod snapshots with real Telegram user IDs) must never be committed
+*.db
+*.db-shm
+*.db-wal
+
+# Configuration with secrets (bot token, OpenAI key)
+appsettings.json
+appsettings.*.json
+!appsettings.example.json
+
+# Local inspection/scratch tooling
+tmp-find/
+
+# Claude Code local settings (may contain credentials in allowed commands)
+.claude/settings.local.json
+
+# Local publish output (deploy.ps1)
+publish/
+# --- End project-specific ---
+
 # User-specific files
 *.rsuser
 *.suo
