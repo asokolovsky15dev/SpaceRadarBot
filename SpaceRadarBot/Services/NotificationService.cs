@@ -203,7 +203,9 @@ public class NotificationService
 
                 // Фактические минуты до старта: после переносов уведомление может сработать
                 // не за 30 минут, а позже — или когда запуск уже прошёл.
-                var minutesUntilLaunch = (int)Math.Round((launch.LaunchTime - DateTime.UtcNow).TotalMinutes);
+                // Округляем вверх: тик раз в минуту срабатывает чуть позже отметки T-30,
+                // и Round давал бы «29 минут» — Ceiling показывает честные «не позже чем через 30».
+                var minutesUntilLaunch = (int)Math.Ceiling((launch.LaunchTime - DateTime.UtcNow).TotalMinutes);
 
                 if (minutesUntilLaunch <= 0)
                 {
